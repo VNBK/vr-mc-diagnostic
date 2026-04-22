@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 480" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .step   { fill:#eef3f8; stroke:#3b7ea1; stroke-width:2; rx:6; }
+    .step.w { fill:#fff4e0; stroke:#b28c32; }
+    .num    { fill:#3b7ea1; font-weight:700; font-size:14px; }
+    .ttl    { font-weight:700; font-size:13px; fill:#1a1f2a; }
+    .sub    { font-size:11.5px; fill:#5a6370; }
+    .edge   { fill:none; stroke:#5a6370; stroke-width:1.6; marker-end:url(#a); }
+    .warn   { fill:#fbe8e8; stroke:#c03030; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="440" y="28" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    CiA 301 §7.2.2.2 — PDO remap dance (TPDO1 example)
+  </text>
+  <text x="440" y="48" text-anchor="middle" font-size="12" fill="#5a6370">
+    Every step is an SDO write from MasterWorker to the slave.
+  </text>
+
+  <!-- Step 1 -->
+  <rect class="step" x="40" y="80" width="800" height="56"/>
+  <text class="num"  x="60" y="108">1</text>
+  <text class="ttl"  x="90" y="102">Disable the PDO</text>
+  <text class="sub"  x="90" y="122">write 0x1800:1 ← (current COB-ID) | 0x80000000   · bit 31 = "do not send"</text>
+
+  <!-- Step 2 -->
+  <rect class="step" x="40" y="148" width="800" height="56"/>
+  <text class="num"  x="60" y="176">2</text>
+  <text class="ttl"  x="90" y="170">Clear the mapping count</text>
+  <text class="sub"  x="90" y="190">write 0x1A00:0 ← 0   · tells the drive "I'm about to rewrite your mapping entries"</text>
+
+  <!-- Step 3 -->
+  <rect class="step w" x="40" y="216" width="800" height="86"/>
+  <text class="num"  x="60" y="244">3</text>
+  <text class="ttl"  x="90" y="238">Write each mapping entry</text>
+  <text class="sub"  x="90" y="258">for i in 1..N:  write 0x1A00:i ← (idx &lt;&lt; 16) | (sub &lt;&lt; 8) | bits</text>
+  <text class="sub"  x="90" y="276">example: 0x6041_00_10 = Statusword (0x6041 sub 0, 16 bits)</text>
+  <text class="sub"  x="90" y="292">          0x6064_00_20 = Position actual (0x6064 sub 0, 32 bits)</text>
+
+  <!-- Step 4 -->
+  <rect class="step" x="40" y="316" width="800" height="56"/>
+  <text class="num"  x="60" y="344">4</text>
+  <text class="ttl"  x="90" y="338">Commit the new count</text>
+  <text class="sub"  x="90" y="358">write 0x1A00:0 ← N   · drive validates: total bytes ≤ 64, all (idx,sub) resolve, bit_length % 8 == 0</text>
+
+  <!-- Step 5 -->
+  <rect class="step" x="40" y="384" width="800" height="56"/>
+  <text class="num"  x="60" y="412">5</text>
+  <text class="ttl"  x="90" y="406">Re-enable the PDO</text>
+  <text class="sub"  x="90" y="426">write 0x1800:1 ← (COB-ID) · clears bit 31, drive resumes TPDO emission with the new layout</text>
+
+  <!-- Connecting edges -->
+  <path class="edge" d="M440 136 L440 146"/>
+  <path class="edge" d="M440 204 L440 214"/>
+  <path class="edge" d="M440 302 L440 314"/>
+  <path class="edge" d="M440 372 L440 382"/>
+</svg>

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 440" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .box    { fill:#f4f6f9; stroke:#3b7ea1; stroke-width:2; rx:6; }
+    .box.sdo { fill:#fff4e0; stroke:#b28c32; }
+    .box.pdo { fill:#eef8f2; stroke:#3b9a6d; }
+    .box.drv { fill:#f0e8f6; stroke:#7453a3; }
+    .ttl    { font-weight:700; font-size:13px; fill:#1a1f2a; }
+    .sub    { font-size:11.5px; fill:#5a6370; }
+    .arr    { fill:none; stroke-width:1.8; marker-end:url(#am); }
+    .arr.req { stroke:#b28c32; }
+    .arr.rsp { stroke:#b28c32; stroke-dasharray:5 4; }
+    .arr.pdo { stroke:#3b9a6d; }
+    .banner { font-size:14px; font-weight:700; }
+  </style>
+  <defs>
+    <marker id="am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="430" y="28" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    Two wires per slave: SDO for commands, PDO for telemetry
+  </text>
+
+  <!-- SDO row -->
+  <rect class="box sdo" x="40" y="70" width="200" height="80"/>
+  <text class="ttl" x="140" y="94" text-anchor="middle">MasterWorker</text>
+  <text class="sub" x="140" y="114" text-anchor="middle">Configure Drive</text>
+  <text class="sub" x="140" y="130" text-anchor="middle">Gains R/W · bring-up</text>
+
+  <rect class="box" x="330" y="70" width="200" height="80"/>
+  <text class="ttl" x="430" y="94" text-anchor="middle">co_fd_usdo_client</text>
+  <text class="sub" x="430" y="114" text-anchor="middle">SDO client · 100 ms timeout</text>
+  <text class="sub" x="430" y="130" text-anchor="middle">sync_ctx per slave</text>
+
+  <rect class="box drv" x="620" y="70" width="200" height="80"/>
+  <text class="ttl" x="720" y="94" text-anchor="middle">Drive OD server</text>
+  <text class="sub" x="720" y="114" text-anchor="middle">0x1000 — 0x60FF</text>
+  <text class="sub" x="720" y="130" text-anchor="middle">expedited + segmented</text>
+
+  <path class="arr req" d="M240 100 L328 100"/>
+  <text class="sub" x="284" y="92" text-anchor="middle">SDO request</text>
+  <path class="arr req" d="M530 100 L618 100"/>
+  <text class="sub" x="574" y="92" text-anchor="middle">0x600+id</text>
+  <path class="arr rsp" d="M618 130 L332 130"/>
+  <text class="sub" x="475" y="148" text-anchor="middle">0x580+id — response / abort</text>
+
+  <!-- separator -->
+  <line x1="40" y1="200" x2="820" y2="200" stroke="#cbd5e2" stroke-dasharray="4 3"/>
+
+  <!-- PDO row -->
+  <rect class="box drv" x="620" y="235" width="200" height="80"/>
+  <text class="ttl" x="720" y="259" text-anchor="middle">Drive TPDO1 emitter</text>
+  <text class="sub" x="720" y="279" text-anchor="middle">2 kHz · async-mfr (254)</text>
+  <text class="sub" x="720" y="295" text-anchor="middle">14 B · sw · pos · vel · trq · err</text>
+
+  <rect class="box" x="330" y="235" width="200" height="80"/>
+  <text class="ttl" x="430" y="259" text-anchor="middle">can_fd_pdo</text>
+  <text class="sub" x="430" y="279" text-anchor="middle">rx ring · dispatch by COB-ID</text>
+  <text class="sub" x="430" y="295" text-anchor="middle">rpdoRx → PdoSlot cache</text>
+
+  <rect class="box pdo" x="40" y="235" width="200" height="80"/>
+  <text class="ttl" x="140" y="259" text-anchor="middle">MasterWorker onTick</text>
+  <text class="sub" x="140" y="279" text-anchor="middle">CanBackend::getPdo</text>
+  <text class="sub" x="140" y="295" text-anchor="middle">SlaveSnapshot → signal</text>
+
+  <path class="arr pdo" d="M618 265 L532 265"/>
+  <text class="sub" x="575" y="257" text-anchor="middle">0x180+id</text>
+  <path class="arr pdo" d="M328 265 L242 265"/>
+  <text class="sub" x="285" y="257" text-anchor="middle">decoded fields</text>
+
+  <!-- Path split labels -->
+  <text class="banner" x="40" y="180" fill="#b28c32">SDO — request / response</text>
+  <text class="banner" x="40" y="226" fill="#3b9a6d">PDO — 2 kHz async push</text>
+
+  <!-- Bottom summary -->
+  <rect class="box" x="200" y="355" width="460" height="60"/>
+  <text class="ttl" x="430" y="378" text-anchor="middle">Two hal_can endpoints on the same UDP group</text>
+  <text class="sub" x="430" y="398" text-anchor="middle">hal_can_set_cb is single-consumer — separate sockets keep the PDO rx from shadowing the SDO client</text>
+</svg>

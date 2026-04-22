@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 580" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .lane  { fill:none; stroke:#cbd5e2; stroke-width:1.4; stroke-dasharray:4 4; }
+    .box   { fill:#eef3f8; stroke:#3b7ea1; stroke-width:2; rx:5; }
+    .box.b { fill:#eef8f2; stroke:#3b9a6d; }
+    .box.r { fill:#fbe8e8; stroke:#c03030; }
+    .head  { fill:#0f1a2a; }
+    .title { font-weight:700; font-size:13px; fill:#fff; }
+    .lbl   { font-size:11.5px; fill:#1a1f2a; }
+    .note  { font-size:11px; fill:#5a6370; font-style:italic; }
+    .arr   { fill:none; stroke:#5a6370; stroke-width:1.6; marker-end:url(#ah); }
+    .arr.b { stroke:#3b9a6d; }
+    .arr.r { stroke:#c03030; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="440" y="26" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    Start Homing — SDO writes + live statusword readback
+  </text>
+
+  <!-- Lanes -->
+  <rect class="head" x="40"  y="50" width="220" height="28" rx="4"/>
+  <text class="title" x="150" y="69" text-anchor="middle">User (dialog)</text>
+  <rect class="head" x="280" y="50" width="220" height="28" rx="4"/>
+  <text class="title" x="390" y="69" text-anchor="middle">MasterWorker</text>
+  <rect class="head" x="520" y="50" width="220" height="28" rx="4"/>
+  <text class="title" x="630" y="69" text-anchor="middle">Drive (CiA 402)</text>
+
+  <line class="lane" x1="150" y1="85" x2="150" y2="560"/>
+  <line class="lane" x1="390" y1="85" x2="390" y2="560"/>
+  <line class="lane" x1="630" y1="85" x2="630" y2="560"/>
+
+  <!-- 1. Click Start Homing -->
+  <rect class="box b" x="45"  y="100" width="210" height="36"/>
+  <text class="lbl" x="150" y="122" text-anchor="middle">Click Start Homing</text>
+  <path class="arr b" d="M260 118 L288 118"/>
+
+  <!-- Worker writes mode 6 -->
+  <rect class="box" x="290" y="150" width="200" height="40"/>
+  <text class="lbl" x="390" y="170" text-anchor="middle">writeSdo 0x6060 = 6</text>
+  <text class="note" x="390" y="184" text-anchor="middle">mode of operation = Homing</text>
+  <path class="arr" d="M490 170 L628 170"/>
+
+  <!-- Drive acks -->
+  <rect class="box" x="525" y="200" width="200" height="30"/>
+  <text class="lbl" x="625" y="220" text-anchor="middle">SDO download response · 0</text>
+  <path class="arr" d="M522 215 L392 215"/>
+
+  <!-- CW 0x000F -->
+  <rect class="box" x="290" y="240" width="200" height="40"/>
+  <text class="lbl" x="390" y="260" text-anchor="middle">writeSdo 0x6040 = 0x000F</text>
+  <text class="note" x="390" y="274" text-anchor="middle">enable op, bit 4 low</text>
+  <path class="arr" d="M490 260 L628 260"/>
+  <rect class="box" x="525" y="290" width="200" height="26"/>
+  <text class="lbl" x="625" y="308" text-anchor="middle">ack</text>
+  <path class="arr" d="M522 303 L392 303"/>
+
+  <!-- CW 0x001F (rising edge) -->
+  <rect class="box r" x="290" y="326" width="200" height="40"/>
+  <text class="lbl" x="390" y="346" text-anchor="middle">writeSdo 0x6040 = 0x001F</text>
+  <text class="note" x="390" y="360" text-anchor="middle">rising edge bit 4 → go</text>
+  <path class="arr r" d="M490 346 L628 346"/>
+
+  <!-- Drive starts homing -->
+  <rect class="box" x="525" y="376" width="200" height="40"/>
+  <text class="lbl" x="625" y="396" text-anchor="middle">drive begins homing sweep</text>
+  <text class="note" x="625" y="410" text-anchor="middle">statusword bit 12 = 0</text>
+
+  <!-- TPDO stream -->
+  <text class="note" x="150" y="396" text-anchor="middle">(dialog watches banner)</text>
+  <path class="arr b" d="M522 446 L170 446"/>
+  <rect class="box b" x="45"  y="460" width="210" height="46"/>
+  <text class="lbl" x="150" y="480" text-anchor="middle">banner: 0x0250 in progress…</text>
+  <text class="lbl" x="150" y="495" text-anchor="middle">then 0x1637 → attained</text>
+  <text class="note" x="630" y="440" text-anchor="middle">TPDO1 statusword live</text>
+
+  <rect class="box" x="525" y="514" width="200" height="40"/>
+  <text class="lbl" x="625" y="534" text-anchor="middle">bit 12 set = homing attained</text>
+  <text class="note" x="625" y="548" text-anchor="middle">origin now committed</text>
+</svg>

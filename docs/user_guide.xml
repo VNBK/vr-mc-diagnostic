@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<book xmlns="http://docbook.org/ns/docbook" version="5.0" xml:lang="en">
+  <info>
+    <title>VR Motor Control Diagnostic Tool</title>
+    <subtitle>User Guide</subtitle>
+    <publisher>
+      <publishername>VinRobotic</publishername>
+    </publisher>
+    <releaseinfo>Version 1.0</releaseinfo>
+    <abstract>
+      <para>Commissioning, tuning, and field-diagnostic workflows for
+        CiA 402 motor drives via the Qt 6 desktop diagnostic built on
+        <code>vr-mc-sdk</code>.</para>
+    </abstract>
+  </info>
+
+  <chapter xml:id="overview">
+    <title>Overview</title>
+    <para>The diagnostic is a standalone Qt 6 application that talks to
+      CiA 402 motor drives over a <code>hal_can</code> transport. It
+      wraps the <code>master_mgr</code> and
+      <code>motor_drive_interface</code> C layers from
+      <code>vr-mc-sdk</code> in a signal/slot-based Qt worker thread and
+      surfaces the state, telemetry, and commissioning knobs of every
+      attached slave.</para>
+    <figure xml:id="fig-architecture">
+      <title>Runtime architecture</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/architecture.svg" format="SVG"/></imageobject>
+      </mediaobject>
+    </figure>
+    <informaltable frame="all">
+      <tgroup cols="2">
+        <thead>
+          <row><entry>Transport</entry><entry>When to use</entry></row>
+        </thead>
+        <tbody>
+          <row><entry>UDP (<code>hal_can_udp</code>)</entry>
+               <entry>Loopback against <code>motor_drive_cia402</code> simulator or host bring-up.</entry></row>
+          <row><entry>ZLG USB-CANFD (<code>hal_can_zlg</code>)</entry>
+               <entry>USB-CANFD adapter talking to real drives.</entry></row>
+        </tbody>
+      </tgroup>
+    </informaltable>
+    <para>Drives appear in the slave table as soon as a connection is
+      established; telemetry is driven by TPDO1 at whatever rate the
+      drive emits (2 kHz in the bundled simulator).</para>
+  </chapter>
+
+  <chapter xml:id="connecting">
+    <title>Connecting</title>
+    <orderedlist>
+      <listitem><para><guimenu>File</guimenu> <guimenuitem>Connect…</guimenuitem> (<keycombo><keycap>Ctrl</keycap><keycap>K</keycap></keycombo>), or the plug icon on the toolbar.</para></listitem>
+      <listitem><para>Pick the transport. UDP defaults to <code>239.192.0.42:23400</code>; ZLG asks for channel, arbitration bitrate, and data-phase bitrate.</para></listitem>
+      <listitem><para>Set <guilabel>First node id</guilabel> and <guilabel>Count</guilabel>. The diagnostic brings up that range and registers each slave into <code>master_mgr</code>.</para></listitem>
+      <listitem><para>Click <guibutton>Connect</guibutton>. The status bar flips green and the table fills.</para></listitem>
+    </orderedlist>
+    <para><guimenuitem>Reconnect</guimenuitem> (<keycombo><keycap>Ctrl</keycap><keycap>R</keycap></keycombo>) replays the last config; <guimenuitem>Disconnect</guimenuitem> tears everything down idempotently.</para>
+  </chapter>
+
+  <chapter xml:id="main-window">
+    <title>Main window</title>
+    <figure xml:id="fig-layout">
+      <title>Annotated layout</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/window_layout.svg" format="SVG"/></imageobject>
+      </mediaobject>
+    </figure>
+    <figure xml:id="fig-main">
+      <title>Main window connected to the simulator</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/main_window.png" format="PNG"/></imageobject>
+      </mediaobject>
+    </figure>
+    <informaltable frame="all">
+      <tgroup cols="2">
+        <thead><row><entry>Area</entry><entry>Contains</entry></row></thead>
+        <tbody>
+          <row><entry>Toolbar</entry><entry>File, Connect/Disconnect, detachable panes, Drive, E-STOP.</entry></row>
+          <row><entry>Slave table</entry><entry>One row per slave: id, state, online, position, velocity, torque.</entry></row>
+          <row><entry>Left tabs</entry><entry><guilabel>Control</guilabel>, <guilabel>Gains</guilabel>, <guilabel>Signal gen</guilabel>.</entry></row>
+          <row><entry>Telemetry pane</entry><entry>QtCharts multi-channel scope for the active slave.</entry></row>
+          <row><entry>Log dock</entry><entry>Info + error stream from the worker.</entry></row>
+          <row><entry>E-STOP</entry><entry>Disables every slave. Shortcut: <keycap>Space</keycap>.</entry></row>
+        </tbody>
+      </tgroup>
+    </informaltable>
+
+    <sect1 xml:id="control-tab"><title>Control tab</title>
+      <para>Bringup, Enable, Disable, Fault reset buttons plus mode selector (none · torque · velocity · position) and a setpoint spin box. Targets route through <code>master_mgr_set_target_one</code>.</para>
+      <figure xml:id="fig-states">
+        <title>CiA 402 state machine</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/cia402_states.svg" format="SVG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+    <sect1 xml:id="gains-tab"><title>Gains tab</title>
+      <para>Per-loop (current, velocity, position) K<subscript>p</subscript> + K<subscript>i</subscript> spin boxes with Read / Write buttons. Reads round-trip via SDO and land on the <code>gainRead</code> signal.</para>
+      <figure xml:id="fig-gains">
+        <title>Gains editor</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/gains.png" format="PNG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+    <sect1 xml:id="signal-gen-tab"><title>Signal generator tab</title>
+      <para>Constant / step / ramp / sine / chirp waveforms. Configurable amplitude, offset, frequency (plus frequency end for chirp), duration, and update rate. Drives the selected target on the slave at the chosen rate.</para>
+      <figure xml:id="fig-siggen">
+        <title>Signal generator</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/signal_gen.png" format="PNG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+  </chapter>
+
+  <chapter xml:id="docked-panes">
+    <title>Detachable panes</title>
+    <sect1 xml:id="profile-dock"><title>Profile</title>
+      <para>Shows the loaded <code>MotorParams</code>: pole pair, R<subscript>s</subscript>, L<subscript>sd</subscript>, L<subscript>sq</subscript>, rated flux, inertia, limits. <guibutton>Edit…</guibutton> opens a modal; <guimenu>File</guimenu> <guimenuitem>Save Profile</guimenuitem> persists to JSON.</para>
+      <figure xml:id="fig-profile">
+        <title>Motor profile dock</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/profile.png" format="PNG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+    <sect1 xml:id="tuning-dock"><title>Tuning</title>
+      <itemizedlist>
+        <listitem><para><guilabel>Step response</guilabel> — pulses the signal generator and overlays cmd vs. actual, reporting overshoot, rise time, and steady-state error.</para></listitem>
+        <listitem><para><guilabel>Bode</guilabel> — log-sweep chirp + Goertzel correlation produces magnitude (dB) and phase (°) vs. frequency.</para></listitem>
+      </itemizedlist>
+      <figure xml:id="fig-tuning">
+        <title>Tuning dock</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/tuning.png" format="PNG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+    <sect1 xml:id="pdo-map-dock"><title>PDO map</title>
+      <para>Two sections (TPDO1 / RPDO1) with a live table: offset, OD index, sub, bits, name, decoded value. The Value column ticks at the worker rate. <guibutton>Edit…</guibutton> opens a mapping editor; on accept the diagnostic runs the CiA 301 §7.2.2.2 remap dance via SDO (disable PDO, clear count, write entries, restore count, re-enable).</para>
+      <figure xml:id="fig-pdomap">
+        <title>PDO map dock</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/pdo_map.png" format="PNG"/></imageobject>
+        </mediaobject>
+      </figure>
+      <figure xml:id="fig-transport">
+        <title>SDO vs PDO transport paths</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/transport_paths.svg" format="SVG"/></imageobject>
+        </mediaobject>
+      </figure>
+      <figure xml:id="fig-remap">
+        <title>CiA 301 PDO remap dance</title>
+        <mediaobject>
+          <imageobject><imagedata fileref="images/pdo_remap.svg" format="SVG"/></imageobject>
+        </mediaobject>
+      </figure>
+    </sect1>
+  </chapter>
+
+  <chapter xml:id="drive-config">
+    <title>Configure Drive</title>
+    <para>Opens via <guimenu>Drive</guimenu> <guimenuitem>Configure Drive…</guimenuitem> (<keycombo><keycap>Ctrl</keycap><keycap>Shift</keycap><keycap>C</keycap></keycombo>). Modeless tabbed dialog that opens with the selected slave and kicks off an SDO read so the form reflects the drive, not defaults.</para>
+    <figure xml:id="fig-cfg">
+      <title>Configure Drive — Homing tab</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/drive_config.png" format="PNG"/></imageobject>
+      </mediaobject>
+    </figure>
+    <figure xml:id="fig-homing-seq">
+      <title>Start Homing message sequence</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/homing_sequence.svg" format="SVG"/></imageobject>
+      </mediaobject>
+    </figure>
+    <figure xml:id="fig-commission">
+      <title>Commissioning workflow — cold connect to tuned</title>
+      <mediaobject>
+        <imageobject><imagedata fileref="images/commissioning_flow.svg" format="SVG"/></imageobject>
+      </mediaobject>
+    </figure>
+
+    <sect1 xml:id="cfg-homing"><title>Homing</title>
+      <para>Method (<code>0x6098</code>), home offset (<code>0x607C</code>), switch / zero search speeds (<code>0x6099:1,2</code>), homing acceleration (<code>0x609A</code>).</para>
+      <itemizedlist>
+        <listitem><para><guibutton>Start Homing</guibutton> — writes mode = 6 to <code>0x6060</code>, pulses controlword bit 4 on <code>0x6040</code> (<code>0x000F → 0x001F</code>). Status banner decodes statusword bits 10 / 12 / 13 live (target reached · homing attained · homing error).</para></listitem>
+        <listitem><para><guibutton>Zero encoder here</guibutton> — reads position_actual (<code>0x6064</code>) and writes it to home_offset (<code>0x607C</code>). Makes "here" the new origin without typing counts.</para></listitem>
+      </itemizedlist>
+    </sect1>
+
+    <sect1 xml:id="cfg-motion"><title>Motion profile</title>
+      <para>Profile velocity (<code>0x6081</code>), profile accel/decel (<code>0x6083</code>/<code>0x6084</code>), quickstop decel (<code>0x6085</code>).</para>
+    </sect1>
+
+    <sect1 xml:id="cfg-protection"><title>Protection</title>
+      <para>Max following error (<code>0x6065</code>) and time (<code>0x6066</code>); position limits (<code>0x607D:1,2</code>); max motor speed (<code>0x6080</code>); max torque (<code>0x6072</code>). <guibutton>Zero torque here</guibutton> reads torque_actual (<code>0x6077</code>) and writes it into torque_offset (<code>0x60B2</code>).</para>
+    </sect1>
+
+    <sect1 xml:id="cfg-encoder"><title>Encoder</title>
+      <para>Resolution (<code>0x608F:1</code>); gear ratio (<code>0x6091:1,2</code>); feed constant (<code>0x6092:1,2</code>).</para>
+    </sect1>
+
+    <sect1 xml:id="cfg-buttons"><title>Action buttons</title>
+      <itemizedlist>
+        <listitem><para><guibutton>Read from drive</guibutton> — batch SDO upload. Missing OD entries are reported but don't abort the batch.</para></listitem>
+        <listitem><para><guibutton>Apply</guibutton> — batch SDO download. Partial failures surface in the log and a warning dialog.</para></listitem>
+        <listitem><para><guibutton>OK</guibutton> — Apply then close. <guibutton>Cancel</guibutton> — discard.</para></listitem>
+      </itemizedlist>
+    </sect1>
+  </chapter>
+
+  <chapter xml:id="drive-other">
+    <title>Drive menu · other actions</title>
+    <itemizedlist>
+      <listitem><para><guimenuitem>Save / Load Config to Flash</guimenuitem> — planned: SDO write to <code>0x1010:1</code> / <code>0x1011:1</code> with ASCII <code>save</code> / <code>load</code>.</para></listitem>
+      <listitem><para><guimenuitem>Factory Reset…</guimenuitem> — confirmation dialog; placeholder.</para></listitem>
+      <listitem><para><guimenuitem>Upload Firmware…</guimenuitem> — target + file picker, simulated 5-second upload with progress bar (real loader deferred).</para></listitem>
+    </itemizedlist>
+  </chapter>
+
+  <chapter xml:id="data-menu">
+    <title>Data menu</title>
+    <itemizedlist>
+      <listitem><para><guimenuitem>Record telemetry</guimenuitem> (<keycombo><keycap>Ctrl</keycap><keycap>Shift</keycap><keycap>R</keycap></keycombo>) — placeholder for per-snapshot CSV.</para></listitem>
+      <listitem><para><guimenuitem>Export telemetry CSV…</guimenuitem> — saves buffered chart data.</para></listitem>
+      <listitem><para><guimenuitem>Clear charts</guimenuitem> — empties the scope.</para></listitem>
+    </itemizedlist>
+  </chapter>
+
+  <chapter xml:id="estop">
+    <title>E-STOP</title>
+    <para>Large red button, always visible. Shortcut <keycap>Space</keycap> is application-wide and fires even when a control has focus. On click: stops any running signal generator, then calls <code>master_mgr_disable_all</code> which drives every slave into Switch-On Disabled.</para>
+  </chapter>
+
+  <chapter xml:id="shortcuts">
+    <title>Keyboard shortcuts</title>
+    <informaltable frame="all">
+      <tgroup cols="2">
+        <thead><row><entry>Combo</entry><entry>Action</entry></row></thead>
+        <tbody>
+          <row><entry><keycombo><keycap>Ctrl</keycap><keycap>K</keycap></keycombo></entry><entry>Connect…</entry></row>
+          <row><entry><keycombo><keycap>Ctrl</keycap><keycap>R</keycap></keycombo></entry><entry>Reconnect</entry></row>
+          <row><entry><keycombo><keycap>Ctrl</keycap><keycap>E</keycap></keycombo></entry><entry>Edit motor profile</entry></row>
+          <row><entry><keycombo><keycap>Ctrl</keycap><keycap>Shift</keycap><keycap>C</keycap></keycombo></entry><entry>Configure drive</entry></row>
+          <row><entry><keycombo><keycap>Ctrl</keycap><keycap>Shift</keycap><keycap>R</keycap></keycombo></entry><entry>Toggle recording</entry></row>
+          <row><entry><keycap>Space</keycap></entry><entry>E-STOP</entry></row>
+          <row><entry><keycap>F1</keycap></entry><entry>Documentation</entry></row>
+        </tbody>
+      </tgroup>
+    </informaltable>
+  </chapter>
+
+  <chapter xml:id="troubleshooting">
+    <title>Troubleshooting</title>
+    <informaltable frame="all">
+      <tgroup cols="2">
+        <thead><row><entry>Symptom</entry><entry>Likely cause</entry></row></thead>
+        <tbody>
+          <row><entry>Configure Drive: "all fields aborted"</entry><entry>Drive doesn't expose these CiA 402 objects (the simulator doesn't).</entry></row>
+          <row><entry><code>CO_FD_USDO_CLIENT: Session timeout</code></entry><entry>Drive not responding — check node id, bus up, transport.</entry></row>
+          <row><entry>PDO map Value column stays <code>—</code></entry><entry>No TPDO received; drive not emitting or COB-ID mismatch.</entry></row>
+          <row><entry>E-STOP disabled</entry><entry>Not connected yet.</entry></row>
+        </tbody>
+      </tgroup>
+    </informaltable>
+  </chapter>
+
+  <appendix xml:id="transports">
+    <title>Transports</title>
+    <sect1 xml:id="udp"><title>UDP multicast</title>
+      <para>Two sockets per connection (one SDO, one PDO), both bound to <code>239.192.0.42:23400</code> on the loopback interface with <code>SO_REUSEADDR</code>. A 12-byte header (sender tag · COB-ID · len · flags) rides each packet so the sockets filter self-echoes.</para>
+    </sect1>
+    <sect1 xml:id="zlg"><title>ZLG USB-CANFD</title>
+      <para><code>libcontrolcanfd.so</code> is opened with <code>dlopen()</code> at runtime; the shared object ships in <code>src/backends/zlg/lib/</code>. One endpoint per channel — PDO is not yet wired on this transport (V1 is SDO-only).</para>
+    </sect1>
+  </appendix>
+</book>

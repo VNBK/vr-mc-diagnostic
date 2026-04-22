@@ -1,0 +1,56 @@
+/**
+ * @file   ConnectionDialog.hpp
+ * @brief  Modal dialog collecting transport choice (UDP / ZLG) plus
+ *         backend-specific endpoint params and slave-id range.
+ */
+
+#pragma once
+
+#include "backends/CanBackend.hpp"
+#include <QDialog>
+
+class QComboBox;
+class QGroupBox;
+class QLineEdit;
+class QSpinBox;
+
+namespace vrmc {
+
+class ConnectionDialog : public QDialog
+{
+    Q_OBJECT
+public:
+    explicit ConnectionDialog(QWidget* parent = nullptr);
+
+    CanConfig config() const;
+
+private slots:
+    void onTransportChanged();
+
+private:
+    QComboBox* m_transport = nullptr;
+
+    /* UDP-specific. */
+    QGroupBox* m_udpBox    = nullptr;
+    QLineEdit* m_group     = nullptr;
+    QSpinBox*  m_port      = nullptr;
+
+    /* ZLG-specific. */
+    QGroupBox* m_zlgBox    = nullptr;
+    QSpinBox*  m_zlgChan   = nullptr;
+    QSpinBox*  m_zlgArb    = nullptr;
+    QSpinBox*  m_zlgFd     = nullptr;
+
+    /* UART-based (shared by Feetech + Dynamixel). */
+    QGroupBox* m_uartBox   = nullptr;
+    QLineEdit* m_uartDev   = nullptr;
+    QSpinBox*  m_uartBaud  = nullptr;
+    QSpinBox*  m_dxlProto  = nullptr;
+
+    /* Common. */
+    QSpinBox*  m_firstId   = nullptr;
+    QSpinBox*  m_count     = nullptr;
+    QSpinBox*  m_timeout   = nullptr;
+};
+
+}  // namespace vrmc

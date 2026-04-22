@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 280" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .step { fill:#eef8f2; stroke:#3b9a6d; stroke-width:2; rx:8; }
+    .step.w { fill:#fff4e0; stroke:#b28c32; }
+    .step.c { fill:#f0e8f6; stroke:#7453a3; }
+    .step.z { fill:#eef3f8; stroke:#3b7ea1; }
+    .idx    { font-size:14px; font-weight:700; fill:#1a1f2a; }
+    .ttl    { font-size:12.5px; font-weight:600; fill:#1a1f2a; }
+    .sub    { font-size:11px; fill:#5a6370; }
+    .arr    { fill:none; stroke:#5a6370; stroke-width:1.8; marker-end:url(#a); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="490" y="30" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    Commissioning workflow — drive out of the box to tuned
+  </text>
+
+  <g>
+    <rect class="step" x="20"  y="60" width="140" height="100"/>
+    <text class="idx" x="90" y="82" text-anchor="middle">1. Connect</text>
+    <text class="ttl" x="90" y="104" text-anchor="middle">File · Connect…</text>
+    <text class="sub" x="90" y="124" text-anchor="middle">Pick UDP / ZLG</text>
+    <text class="sub" x="90" y="140" text-anchor="middle">Set node range</text>
+    <text class="sub" x="90" y="156" text-anchor="middle">Ctrl+K</text>
+
+    <rect class="step z" x="180" y="60" width="140" height="100"/>
+    <text class="idx" x="250" y="82" text-anchor="middle">2. Bring up</text>
+    <text class="ttl" x="250" y="104" text-anchor="middle">Control · Bringup</text>
+    <text class="sub" x="250" y="124" text-anchor="middle">Not ready → Ready</text>
+    <text class="sub" x="250" y="140" text-anchor="middle">then Enable</text>
+    <text class="sub" x="250" y="156" text-anchor="middle">(state = OP ENABLED)</text>
+
+    <rect class="step w" x="340" y="60" width="140" height="100"/>
+    <text class="idx" x="410" y="82" text-anchor="middle">3. Configure</text>
+    <text class="ttl" x="410" y="104" text-anchor="middle">Drive · Configure</text>
+    <text class="sub" x="410" y="124" text-anchor="middle">Read from drive</text>
+    <text class="sub" x="410" y="140" text-anchor="middle">Limits · Motion</text>
+    <text class="sub" x="410" y="156" text-anchor="middle">Apply</text>
+
+    <rect class="step" x="500" y="60" width="140" height="100"/>
+    <text class="idx" x="570" y="82" text-anchor="middle">4. Home</text>
+    <text class="ttl" x="570" y="104" text-anchor="middle">Start Homing</text>
+    <text class="sub" x="570" y="124" text-anchor="middle">or Zero Encoder</text>
+    <text class="sub" x="570" y="140" text-anchor="middle">(capture pos ⇒</text>
+    <text class="sub" x="570" y="156" text-anchor="middle">home_offset)</text>
+
+    <rect class="step c" x="660" y="60" width="140" height="100"/>
+    <text class="idx" x="730" y="82" text-anchor="middle">5. Tune</text>
+    <text class="ttl" x="730" y="104" text-anchor="middle">Gains · Tuning</text>
+    <text class="sub" x="730" y="124" text-anchor="middle">Step response</text>
+    <text class="sub" x="730" y="140" text-anchor="middle">Bode sweep</text>
+    <text class="sub" x="730" y="156" text-anchor="middle">iterate Kp / Ki</text>
+
+    <rect class="step z" x="820" y="60" width="140" height="100"/>
+    <text class="idx" x="890" y="82" text-anchor="middle">6. Save</text>
+    <text class="ttl" x="890" y="104" text-anchor="middle">Save profile</text>
+    <text class="sub" x="890" y="124" text-anchor="middle">JSON to disk</text>
+    <text class="sub" x="890" y="140" text-anchor="middle">+ Save to Flash</text>
+    <text class="sub" x="890" y="156" text-anchor="middle">(planned)</text>
+  </g>
+
+  <path class="arr" d="M160 110 L178 110"/>
+  <path class="arr" d="M320 110 L338 110"/>
+  <path class="arr" d="M480 110 L498 110"/>
+  <path class="arr" d="M640 110 L658 110"/>
+  <path class="arr" d="M800 110 L818 110"/>
+
+  <text class="sub" x="490" y="210" text-anchor="middle">At any point: Space (E-STOP) drives every slave to Quick-Stop Active.</text>
+  <text class="sub" x="490" y="228" text-anchor="middle">Log dock shows info / error · Telemetry chart ticks at the TPDO rate throughout.</text>
+</svg>

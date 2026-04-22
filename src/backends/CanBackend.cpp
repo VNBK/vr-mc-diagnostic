@@ -1,0 +1,536 @@
+#include "CanBackend.hpp"
+#include "zlg/hal_can_zlg.hpp"
+
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+
+extern "C" {
+#include "master_mgr.h"
+#include "motor_drive_interface.h"
+#include "motor_drive_cia402_intf.h"
+#include "cia402_master.h"
+#include "co_fd_usdo.h"
+#include "co_fd_usdo_sync.h"
+#include "can_fd_pdo.h"
+#include "hal_can.h"
+#include "hal_can_udp.h"
+#include "hal_uart.h"
+#include "hal_uart_linux.h"
+#include "motor_drive_feetech_intf.h"
+#include "feetech/feetech_servo.h"
+}
+
+#include "DynamixelDriver.hpp"
+
+namespace vrmc {
+
+/* PDO snapshot mutated from the CAN RX context, read from the worker.
+ * Guarded by a per-slot mutex (mu); copies are short. */
+struct PdoSlot {
+    mutable std::mutex      mu;
+    uint16_t                statusword = 0;
+    int32_t                 position   = 0;   /* raw counts            */
+    int32_t                 velocity   = 0;   /* raw counts/s          */
+    int16_t                 torque     = 0;   /* per-mille of rated    */
+    uint16_t                error_code = 0;
+    std::atomic<uint64_t>   rx_count{0};
+    std::atomic<bool>       fresh{false};
+};
+
+struct CanBackend::Slot
+{
+    uint8_t                node_id   = 0;
+    uint8_t                pdo_slot  = 0;
+    cia402_master_t*       master    = nullptr;
+    motor_drive_intf_t*    intf      = nullptr;
+    co_fd_usdo_sync_ctx_t  sync_ctx {};
+    char                   name[32]  = {};
+    PdoSlot                pdo;
+};
+
+/* TPDO1 from the CiA 402 sim:
+ *   [0..1]   statusword       (uint16, little-endian)
+ *   [2..5]   position_actual  (int32)
+ *   [6..9]   velocity_actual  (int32)
+ *   [10..11] torque_actual    (int16, per-mille of rated)
+ *   [12..13] error_code       (uint16)
+ */
+static constexpr uint8_t kPdoBytes = 14;
+
+static uint16_t le16(const uint8_t* p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }
+static uint32_t le32(const uint8_t* p) {
+    return uint32_t(p[0])       | (uint32_t(p[1]) << 8) |
+           (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+/* Static RPDO callback. arg is a PdoSlot* (file-scope struct, not the
+ * private CanBackend::Slot). Runs from the CAN RX context — background
+ * poll thread for ZLG, hal_can_udp_poll caller for UDP. */
+static void rpdoRx(uint32_t /*cob_id*/, const uint8_t* data,
+                   uint8_t len, void* arg)
+{
+    auto* p = static_cast<PdoSlot*>(arg);
+    if (!p || !data || len < kPdoBytes){ return; }
+    std::lock_guard<std::mutex> lk(p->mu);
+    p->statusword = le16(data + 0);
+    p->position   = static_cast<int32_t>(le32(data + 2));
+    p->velocity   = static_cast<int32_t>(le32(data + 6));
+    p->torque     = static_cast<int16_t>(le16(data + 10));
+    p->error_code = le16(data + 12);
+    p->rx_count.fetch_add(1, std::memory_order_relaxed);
+    p->fresh.store(true, std::memory_order_release);
+}
+
+/* Static pump hook passed to every slot's sync_ctx. Lets the sync SDO
+ * helper drain the USDO client while a blocking read/write waits. */
+static void pumpStub(void* arg)
+{
+    auto* self = static_cast<CanBackend*>(arg);
+    if (self){
+        self->pump();
+    }
+}
+
+CanBackend::CanBackend() = default;
+
+CanBackend::~CanBackend() { close(); }
+
+bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
+{
+    if (!mgr){
+        if (err){ *err = QStringLiteral("master_mgr is null"); }
+        return false;
+    }
+    if (cfg.count == 0){
+        if (err){ *err = QStringLiteral("slave count is 0"); }
+        return false;
+    }
+
+    /* Build the requested transport. CAN paths share the rest of the
+     * bring-up (SDO client + CiA 402 per-slave), so we fall through to
+     * the common branch below once m_canCli is non-null. UART paths
+     * (Feetech / Dynamixel) register slaves directly and return early. */
+    m_kind = cfg.kind;
+    switch (cfg.kind){
+    case CanKind::Udp: {
+        const QByteArray group = cfg.group.toUtf8();
+        m_canCli = hal_can_udp_create(group.constData(), cfg.port);
+        m_canPdo = hal_can_udp_create(group.constData(), cfg.port);
+        if (!m_canCli || !m_canPdo){
+            if (err){ *err = QStringLiteral("hal_can_udp_create failed"); }
+            close();
+            return false;
+        }
+        break;
+    }
+    case CanKind::Zlg: {
+        /* ZLG: only one consumer per channel today; PDO stays disabled. */
+        m_canCli = hal_can_zlg_create(cfg.zlgLibPath.toStdString(),
+                                      cfg.zlgChannel,
+                                      cfg.zlgBitrate,
+                                      cfg.zlgFdBitrate);
+        if (!m_canCli){
+            if (err){
+                *err = QStringLiteral("hal_can_zlg_create failed "
+                                      "(libcontrolcanfd.so missing or "
+                                      "USB-CANFD device not present?)");
+            }
+            close();
+            return false;
+        }
+        if (m_canCli->proc && m_canCli->proc->start){
+            m_canCli->proc->start(m_canCli);   /* spawn poll thread */
+        }
+        break;
+    }
+    case CanKind::Feetech: {
+        const QByteArray dev = cfg.uartDevice.toUtf8();
+        m_uart = hal_uart_linux_create(dev.constData());
+        if (!m_uart){
+            if (err){
+                *err = QStringLiteral("hal_uart_linux_create failed for %1")
+                           .arg(cfg.uartDevice);
+            }
+            close();
+            return false;
+        }
+        hal_uart_config_t ucfg{};
+        ucfg.baudrate     = cfg.uartBaud;
+        ucfg.word_bits    = 8;
+        ucfg.parity       = HAL_UART_PARITY_NONE;
+        ucfg.stop_bits    = HAL_UART_STOP_1;
+        ucfg.flow_control = false;
+        if (hal_uart_init(m_uart, &ucfg) != 0){
+            if (err){ *err = QStringLiteral("hal_uart_init failed"); }
+            close();
+            return false;
+        }
+        feetech_servo_bind(&m_feetechBus, m_uart);
+        /* Register one motor_drive_feetech_intf per servo id. */
+        for (uint8_t i = 0; i < cfg.count; ++i){
+            auto* slot    = new Slot();
+            slot->node_id = uint8_t(cfg.first_id + i);
+            std::snprintf(slot->name, sizeof(slot->name),
+                          "feetech-%u", unsigned(slot->node_id));
+            motor_drive_feetech_intf_cfg_t icfg{};
+            icfg.bus                 = &m_feetechBus;
+            icfg.id                  = slot->node_id;
+            icfg.counts_per_rad      = 4096.0f / (2.0f * 3.14159265f);
+            icfg.steps_per_rad_per_s = 0.0f;
+            icfg.A_per_Nm            = 0.0f;
+            icfg.acc_default         = 50;
+            icfg.speed_default       = 1000;
+            icfg.bringup_mode        = MOTOR_INTF_MODE_POSITION;
+            icfg.name                = slot->name;
+            slot->intf = motor_drive_feetech_intf_create(&icfg);
+            if (!slot->intf){
+                if (err){ *err = QStringLiteral("feetech intf create failed"); }
+                delete slot; close(); return false;
+            }
+            if (master_mgr_add_slave(mgr, slot->intf) < 0){
+                if (err){ *err = QStringLiteral("master_mgr_add_slave failed"); }
+                motor_drive_intf_free(slot->intf);
+                delete slot; close(); return false;
+            }
+            m_slots.push_back(slot);
+        }
+        return true;   /* UART path: no SDO / PDO bring-up needed. */
+    }
+    case CanKind::Dynamixel: {
+        /* In-tree Dynamixel Protocol 2.0 driver (DynamixelDriver.cpp).
+         * Opens the UART, runs the CRC/framing/stuffing itself — no
+         * ROBOTIS SDK dependency, so this just works at runtime with no
+         * compile flags. cfg.dxlProtocolVer is accepted for forward
+         * compatibility but only 2.0 is implemented today. */
+        std::string dxlErr;
+        m_dxlBus = DynamixelBus::open(cfg.uartDevice.toStdString(),
+                                       cfg.uartBaud, &dxlErr);
+        if (!m_dxlBus || !m_dxlBus->ok()){
+            if (err){
+                *err = QStringLiteral("Dynamixel bus open failed: %1")
+                           .arg(QString::fromStdString(dxlErr));
+            }
+            close();
+            return false;
+        }
+        for (uint8_t i = 0; i < cfg.count; ++i){
+            auto* slot    = new Slot();
+            slot->node_id = uint8_t(cfg.first_id + i);
+            std::snprintf(slot->name, sizeof(slot->name),
+                          "dxl-%u", unsigned(slot->node_id));
+            DynamixelIntfCfg icfg{};
+            icfg.bus          = m_dxlBus;
+            icfg.id           = slot->node_id;
+            icfg.A_per_Nm     = 0.0f;
+            icfg.bringup_mode = MOTOR_INTF_MODE_POSITION;
+            icfg.name         = slot->name;
+            slot->intf = makeDynamixelIntf(icfg);
+            if (!slot->intf){
+                if (err){ *err = QStringLiteral("dynamixel intf create failed"); }
+                delete slot; close(); return false;
+            }
+            if (master_mgr_add_slave(mgr, slot->intf) < 0){
+                if (err){ *err = QStringLiteral("master_mgr_add_slave failed"); }
+                motor_drive_intf_free(slot->intf);
+                delete slot; close(); return false;
+            }
+            m_slots.push_back(slot);
+        }
+        return true;
+    }
+    }
+
+    m_client = co_fd_usdo_client_create(m_canCli, /*od=*/nullptr);
+    if (!m_client){
+        if (err){ *err = QStringLiteral("co_fd_usdo_client_create failed"); }
+        close();
+        return false;
+    }
+
+    m_slots.reserve(cfg.count);
+    for (uint8_t i = 0; i < cfg.count; ++i){
+        auto* slot  = new Slot();
+        slot->node_id = static_cast<uint8_t>(cfg.first_id + i);
+
+        slot->sync_ctx.client     = m_client;
+        slot->sync_ctx.node_id    = slot->node_id;
+        slot->sync_ctx.timeout_ms = cfg.sdo_timeout_ms;
+        slot->sync_ctx.pump       = pumpStub;
+        slot->sync_ctx.pump_arg   = this;
+
+        cia402_master_cfg_t mcfg{};
+        mcfg.read   = co_fd_usdo_sync_read;
+        mcfg.write  = co_fd_usdo_sync_write;
+        mcfg.io_arg = &slot->sync_ctx;
+
+        slot->master = cia402_master_create(&mcfg);
+        if (!slot->master){
+            if (err){ *err = QStringLiteral("cia402_master_create failed"); }
+            delete slot;
+            close();
+            return false;
+        }
+
+        std::snprintf(slot->name, sizeof(slot->name),
+                      "cia402-node-%u", (unsigned)slot->node_id);
+
+        motor_drive_cia402_intf_cfg_t icfg{};
+        icfg.master          = slot->master;
+        icfg.scale           = nullptr;
+        icfg.gain_map        = nullptr;
+        icfg.name            = slot->name;
+        icfg.routing_node_id = &slot->sync_ctx.node_id;
+        icfg.initial_node_id = slot->node_id;
+
+        slot->intf = motor_drive_cia402_intf_create(&icfg);
+        if (!slot->intf){
+            if (err){ *err = QStringLiteral("motor_drive_cia402_intf_create failed"); }
+            cia402_master_destroy(slot->master);
+            delete slot;
+            close();
+            return false;
+        }
+        if (master_mgr_add_slave(mgr, slot->intf) < 0){
+            if (err){ *err = QStringLiteral("master_mgr_add_slave failed"); }
+            motor_drive_intf_free(slot->intf);
+            cia402_master_destroy(slot->master);
+            delete slot;
+            close();
+            return false;
+        }
+        m_slots.push_back(slot);
+    }
+
+    /* Subscribe to each slave's TPDO1 (slave -> master). The simulator
+     * emits at 2 kHz; we cache the latest frame per slot and let the
+     * worker poll the cache at its UI tick rate. PDO uses its own
+     * hal_can endpoint so it doesn't steal the USDO client's RX cb. */
+    if (!m_canPdo){
+        return true;   /* ZLG: PDO unsupported in V0; SDO-only is fine */
+    }
+    m_pdo = can_fd_pdo_create(m_canPdo, /*od=*/nullptr);
+    if (!m_pdo){
+        if (err){ *err = QStringLiteral("can_fd_pdo_create failed"); }
+        close();
+        return false;
+    }
+    for (uint8_t i = 0; i < cfg.count; ++i){
+        Slot* slot = m_slots[i];
+        slot->pdo_slot = i;
+        co_rpdo_config_t rcfg{};
+        rcfg.cob_id     = 0x180u + slot->node_id;
+        rcfg.trans_type = CO_PDO_TX_ASYNC_MFR;
+        rcfg.data_len   = kPdoBytes;
+        rcfg.cb         = rpdoRx;
+        rcfg.arg        = &slot->pdo;
+        if (can_fd_rpdo_configure(m_pdo, slot->pdo_slot, &rcfg) != 0){
+            if (err){
+                *err = QStringLiteral("can_fd_rpdo_configure failed for slot %1")
+                           .arg(i);
+            }
+            close();
+            return false;
+        }
+    }
+    return true;
+}
+
+void CanBackend::close()
+{
+    /* master_mgr_destroy() frees the motor_drive_intf_t*s it owns; we
+     * still own the cia402_master_t* handles and the transport. */
+    for (auto* slot : m_slots){
+        if (slot->master){ cia402_master_destroy(slot->master); }
+        delete slot;
+    }
+    m_slots.clear();
+
+    if (m_pdo)   { can_fd_pdo_destroy(m_pdo);            m_pdo    = nullptr; }
+    if (m_client){ co_fd_usdo_client_destroy(m_client); m_client = nullptr; }
+
+    auto destroyHalCan = [this](hal_can_t** h){
+        if (!*h){ return; }
+        switch (m_kind){
+        case CanKind::Udp: hal_can_udp_destroy(*h); break;
+        case CanKind::Zlg: hal_can_zlg_destroy(*h); break;
+        case CanKind::Feetech:
+        case CanKind::Dynamixel:
+            /* UART transports never allocate hal_can handles. */
+            break;
+        }
+        *h = nullptr;
+    };
+    destroyHalCan(&m_canPdo);
+    destroyHalCan(&m_canCli);
+
+    /* UART teardown. feetech_servo_bind stores a raw pointer; unbind so
+     * the servo helper doesn't hold on to stale memory. */
+    if (m_kind == CanKind::Feetech){
+        feetech_servo_unbind(&m_feetechBus);
+    }
+    if (m_dxlBus){ delete m_dxlBus; m_dxlBus = nullptr; }
+    if (m_uart){
+        hal_uart_linux_destroy(m_uart);
+        m_uart = nullptr;
+    }
+}
+
+void CanBackend::pump()
+{
+    /* UDP delivers frames only when polled; ZLG runs its own RX thread
+     * and pushes via the rx callback. Both endpoints need a poll, then
+     * the PDO + USDO state machines tick regardless of transport. */
+    if (m_kind == CanKind::Udp){
+        if (m_canCli){ hal_can_udp_poll(m_canCli); }
+        if (m_canPdo){ hal_can_udp_poll(m_canPdo); }
+    }
+    if (m_pdo)   { can_fd_pdo_process(m_pdo, /*dt_us=*/1000); }
+    if (m_client){ co_fd_usdo_client_process(m_client, 1); }
+    /* Feetech / Dynamixel: no async RX to pump — every servo op is a
+     * synchronous request/reply done inside motor_drive_*_intf. */
+}
+
+int CanBackend::writePdoMapping(int slotIdx, bool isTpdo,
+                                const std::vector<PdoMapEntry>& entries,
+                                QString* err)
+{
+    if (m_kind != CanKind::Udp && m_kind != CanKind::Zlg){
+        if (err){
+            *err = QStringLiteral("PDO mapping is CiA 402-only; "
+                                  "current transport is Feetech/Dynamixel");
+        }
+        return -1;
+    }
+    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= m_slots.size()){
+        if (err){ *err = QStringLiteral("invalid slave index"); }
+        return -1;
+    }
+    if (entries.size() > 16){
+        if (err){ *err = QStringLiteral("too many mapping entries (max 16)"); }
+        return -1;
+    }
+    /* SDO helpers need an active USDO client — no-op if we're closed. */
+    if (!m_client){
+        if (err){ *err = QStringLiteral("not connected"); }
+        return -1;
+    }
+
+    Slot*    slot    = m_slots[slotIdx];
+    const uint16_t commIdx = isTpdo ? 0x1800u : 0x1400u;
+    const uint16_t mapIdx  = isTpdo ? 0x1A00u : 0x1600u;
+    const uint32_t cobId   = (isTpdo ? 0x180u : 0x200u) + slot->node_id;
+
+    auto writeU32 = [&](uint16_t idx, uint8_t sub, uint32_t v) -> int {
+        uint8_t buf[4] = { uint8_t(v), uint8_t(v >> 8),
+                           uint8_t(v >> 16), uint8_t(v >> 24) };
+        return co_fd_usdo_sync_write(idx, sub, buf, 4, &slot->sync_ctx);
+    };
+    auto writeU8 = [&](uint16_t idx, uint8_t sub, uint8_t v) -> int {
+        return co_fd_usdo_sync_write(idx, sub, &v, 1, &slot->sync_ctx);
+    };
+
+    int rc = writeU32(commIdx, 1, cobId | 0x80000000u);
+    if (rc != 0){
+        if (err){ *err = QStringLiteral("disable PDO failed (rc=%1)").arg(rc); }
+        return rc;
+    }
+    rc = writeU8(mapIdx, 0, 0);
+    if (rc != 0){
+        if (err){ *err = QStringLiteral("clear map count failed (rc=%1)").arg(rc); }
+        (void)writeU32(commIdx, 1, cobId);     /* best-effort re-enable */
+        return rc;
+    }
+    for (size_t i = 0; i < entries.size(); ++i){
+        const auto& e = entries[i];
+        const uint32_t packed =
+            (uint32_t(e.idx) << 16) | (uint32_t(e.sub) << 8) | e.bits;
+        rc = writeU32(mapIdx, uint8_t(i + 1), packed);
+        if (rc != 0){
+            if (err){
+                *err = QStringLiteral("map entry %1 failed (rc=%2)")
+                           .arg(i + 1).arg(rc);
+            }
+            (void)writeU32(commIdx, 1, cobId);
+            return rc;
+        }
+    }
+    rc = writeU8(mapIdx, 0, uint8_t(entries.size()));
+    if (rc != 0){
+        if (err){ *err = QStringLiteral("set map count failed (rc=%1)").arg(rc); }
+        (void)writeU32(commIdx, 1, cobId);
+        return rc;
+    }
+    rc = writeU32(commIdx, 1, cobId);
+    if (rc != 0){
+        if (err){ *err = QStringLiteral("enable PDO failed (rc=%1)").arg(rc); }
+        return rc;
+    }
+    return 0;
+}
+
+int CanBackend::readSdo(int slotIdx, uint16_t odIdx, uint8_t odSub,
+                        void* buf, uint32_t len, QString* err)
+{
+    if (m_kind != CanKind::Udp && m_kind != CanKind::Zlg){
+        if (err){
+            *err = QStringLiteral("SDO R/W is CiA 402-only");
+        }
+        return -1;
+    }
+    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= m_slots.size() || !buf){
+        if (err){ *err = QStringLiteral("invalid args"); }
+        return -1;
+    }
+    Slot* slot = m_slots[slotIdx];
+    const int rc = co_fd_usdo_sync_read(odIdx, odSub, buf, len, &slot->sync_ctx);
+    if (rc != 0 && err){
+        *err = QStringLiteral("SDO read 0x%1.%2 failed (rc=%3)")
+                   .arg(odIdx, 4, 16, QChar('0')).arg(odSub).arg(rc);
+    }
+    return rc;
+}
+
+int CanBackend::writeSdo(int slotIdx, uint16_t odIdx, uint8_t odSub,
+                         const void* buf, uint32_t len, QString* err)
+{
+    if (m_kind != CanKind::Udp && m_kind != CanKind::Zlg){
+        if (err){
+            *err = QStringLiteral("SDO R/W is CiA 402-only");
+        }
+        return -1;
+    }
+    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= m_slots.size() || !buf){
+        if (err){ *err = QStringLiteral("invalid args"); }
+        return -1;
+    }
+    Slot* slot = m_slots[slotIdx];
+    const int rc = co_fd_usdo_sync_write(odIdx, odSub, buf, len, &slot->sync_ctx);
+    if (rc != 0 && err){
+        *err = QStringLiteral("SDO write 0x%1.%2 failed (rc=%3)")
+                   .arg(odIdx, 4, 16, QChar('0')).arg(odSub).arg(rc);
+    }
+    return rc;
+}
+
+bool CanBackend::getPdo(uint32_t idx, PdoFrame* out) const
+{
+    if (!out || idx >= m_slots.size()){ return false; }
+    const Slot* slot = m_slots[idx];
+    if (!slot->pdo.fresh.load(std::memory_order_acquire)){
+        out->fresh = false;
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(slot->pdo.mu);
+    out->statusword = slot->pdo.statusword;
+    out->position   = slot->pdo.position;
+    out->velocity   = slot->pdo.velocity;
+    out->torque     = slot->pdo.torque;
+    out->error_code = slot->pdo.error_code;
+    out->rx_count   = slot->pdo.rx_count.load(std::memory_order_relaxed);
+    out->fresh      = true;
+    return true;
+}
+
+}  // namespace vrmc

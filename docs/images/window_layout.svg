@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .frame { fill:#fff; stroke:#5a6370; stroke-width:1.5; rx:4; }
+    .bar   { fill:#eef3f8; stroke:#3b7ea1; stroke-width:1.5; rx:4; }
+    .area  { fill:#f4f6f9; stroke:#3b7ea1; stroke-width:1.5; rx:4; }
+    .area.t  { fill:#eef8f2; stroke:#3b9a6d; }
+    .area.c  { fill:#fff4e0; stroke:#b28c32; }
+    .area.d  { fill:#f0e8f6; stroke:#7453a3; }
+    .area.e  { fill:#fbe8e8; stroke:#c03030; }
+    .ttl   { font-weight:700; font-size:12.5px; fill:#1a1f2a; }
+    .sub   { font-size:11px; fill:#5a6370; }
+    .cap   { font-size:10.5px; fill:#3b7ea1; font-weight:600; }
+    .call  { fill:none; stroke:#3b7ea1; stroke-width:1.2; stroke-dasharray:3 3; }
+  </style>
+
+  <text x="460" y="28" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    Main window — what lives where
+  </text>
+
+  <rect class="frame" x="180" y="60" width="560" height="400"/>
+
+  <!-- Menu row -->
+  <rect class="bar" x="180" y="60" width="560" height="22"/>
+  <text class="sub" x="192" y="76">File · Connection · Drive · Data · View · Help</text>
+
+  <!-- Toolbar -->
+  <rect class="bar" x="180" y="82" width="560" height="46"/>
+  <text class="sub" x="192" y="104">[Open][Save] | [Connect][Disconnect][Reconnect] | [Profile][Tuning][PDO map] | …</text>
+  <rect class="area e" x="682" y="86" width="54" height="38"/>
+  <text class="cap" x="709" y="110" text-anchor="middle">E-STOP</text>
+
+  <!-- Slave table -->
+  <rect class="area" x="186" y="136" width="548" height="74"/>
+  <text class="ttl" x="200" y="156">Slave table</text>
+  <text class="sub" x="200" y="174">idx · id · name · state · online · pos · vel · trq</text>
+  <text class="sub" x="200" y="190">selection drives the per-slave panels below</text>
+
+  <!-- Left tabs -->
+  <rect class="area t" x="186" y="220" width="218" height="150"/>
+  <text class="ttl" x="200" y="240">Left tabs</text>
+  <text class="sub" x="200" y="258">[ Control ] [ Gains ] [ Signal gen ]</text>
+  <text class="sub" x="200" y="278">Bringup · Enable · Fault reset</text>
+  <text class="sub" x="200" y="294">Mode + setpoint spin</text>
+  <text class="sub" x="200" y="310">Kp/Ki read/write · current loop</text>
+  <text class="sub" x="200" y="326">step · ramp · sine · chirp waveforms</text>
+  <text class="sub" x="200" y="342">routes through master_mgr_set_target_one</text>
+
+  <!-- Telemetry -->
+  <rect class="area c" x="410" y="220" width="324" height="150"/>
+  <text class="ttl" x="424" y="240">Live telemetry (QtCharts)</text>
+  <text class="sub" x="424" y="258">multi-channel — pos, vel, trq, cmd, err,</text>
+  <text class="sub" x="424" y="274">current, temperature</text>
+  <text class="sub" x="424" y="296">XY scope · per-line checkboxes</text>
+  <text class="sub" x="424" y="312">fed by snapshots from TPDO1</text>
+
+  <!-- Log dock -->
+  <rect class="area d" x="186" y="376" width="548" height="78"/>
+  <text class="ttl" x="200" y="396">Log dock (bottom)</text>
+  <text class="sub" x="200" y="414">INFO · ERROR from MasterWorker</text>
+  <text class="sub" x="200" y="430">timestamps · colour-coded</text>
+  <text class="sub" x="200" y="446">toggleable via View menu</text>
+
+  <!-- Callouts -->
+  <text class="cap" x="60"  y="80">Menus — every action</text>
+  <text class="cap" x="60"  y="105">Toolbar — one click</text>
+  <text class="cap" x="60"  y="165">Slave selector</text>
+  <text class="cap" x="60"  y="245">Per-slave panels</text>
+  <text class="cap" x="60"  y="395">Event log</text>
+  <text class="cap" x="750" y="110">always-on E-STOP</text>
+  <path class="call" d="M170 75 L180 71"/>
+  <path class="call" d="M170 100 L180 104"/>
+  <path class="call" d="M170 160 L186 160"/>
+  <path class="call" d="M170 240 L186 240"/>
+  <path class="call" d="M170 390 L186 390"/>
+  <path class="call" d="M748 106 L740 106"/>
+
+  <!-- Detachable panes right side -->
+  <rect class="area" x="760" y="136" width="150" height="80" stroke-dasharray="4 4"/>
+  <text class="ttl" x="770" y="156">Profile dock</text>
+  <text class="sub" x="770" y="174">MotorParams table</text>
+  <text class="sub" x="770" y="190">Edit…  →  JSON save</text>
+
+  <rect class="area" x="760" y="224" width="150" height="80" stroke-dasharray="4 4"/>
+  <text class="ttl" x="770" y="244">Tuning dock</text>
+  <text class="sub" x="770" y="262">Step · Bode tabs</text>
+
+  <rect class="area" x="760" y="312" width="150" height="80" stroke-dasharray="4 4"/>
+  <text class="ttl" x="770" y="332">PDO map dock</text>
+  <text class="sub" x="770" y="350">TPDO/RPDO · Edit…</text>
+
+  <text class="cap" x="760" y="420">(detachable · float or re-dock)</text>
+</svg>

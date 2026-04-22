@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 540" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .st       { fill:#eef3f8; stroke:#3b7ea1; stroke-width:2; rx:10; }
+    .st.op    { fill:#eef8f2; stroke:#3b9a6d; stroke-width:2.2; }
+    .st.fault { fill:#fbe8e8; stroke:#c03030; }
+    .title    { font-weight:700; font-size:13px; fill:#1a1f2a; }
+    .sub      { font-size:11px; fill:#5a6370; }
+    .edge     { fill:none; stroke:#5a6370; stroke-width:1.5; marker-end:url(#arr); }
+    .elab     { font-size:11px; fill:#3b7ea1; font-weight:600; }
+  </style>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="430" y="28" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    CiA 402 drive state machine — what Control-tab buttons do
+  </text>
+
+  <!-- States -->
+  <rect class="st" x="40"  y="60"  width="200" height="56"/>
+  <text class="title" x="140" y="82" text-anchor="middle">Not Ready To Switch On</text>
+  <text class="sub"   x="140" y="100" text-anchor="middle">statusword: xxxx xxxx x000 0000</text>
+
+  <rect class="st" x="320" y="60"  width="200" height="56"/>
+  <text class="title" x="420" y="82" text-anchor="middle">Switch On Disabled</text>
+  <text class="sub"   x="420" y="100" text-anchor="middle">statusword: xxxx xxxx x100 0000</text>
+
+  <rect class="st" x="600" y="60"  width="200" height="56"/>
+  <text class="title" x="700" y="82" text-anchor="middle">Ready To Switch On</text>
+  <text class="sub"   x="700" y="100" text-anchor="middle">controlword 0x06 received</text>
+
+  <rect class="st" x="600" y="170" width="200" height="56"/>
+  <text class="title" x="700" y="192" text-anchor="middle">Switched On</text>
+  <text class="sub"   x="700" y="210" text-anchor="middle">controlword 0x07 · voltage enabled</text>
+
+  <rect class="st op" x="600" y="280" width="200" height="76"/>
+  <text class="title" x="700" y="304" text-anchor="middle">OPERATION ENABLED</text>
+  <text class="sub"   x="700" y="322" text-anchor="middle">controlword 0x0F</text>
+  <text class="sub"   x="700" y="338" text-anchor="middle">bit 4 pulse → Start Homing</text>
+
+  <rect class="st" x="320" y="280" width="200" height="56"/>
+  <text class="title" x="420" y="302" text-anchor="middle">Quick Stop Active</text>
+  <text class="sub"   x="420" y="320" text-anchor="middle">E-STOP · controlword 0x02</text>
+
+  <rect class="st fault" x="40" y="280" width="200" height="76"/>
+  <text class="title" x="140" y="304" text-anchor="middle">Fault / Fault Reaction</text>
+  <text class="sub"   x="140" y="322" text-anchor="middle">statusword bit 3 set</text>
+  <text class="sub"   x="140" y="338" text-anchor="middle">Fault reset → controlword 0x80</text>
+
+  <!-- Transitions -->
+  <path class="edge" d="M240 88 L320 88"/>
+  <text class="elab" x="280" y="82" text-anchor="middle">Bringup</text>
+
+  <path class="edge" d="M520 88 L600 88"/>
+  <text class="elab" x="560" y="82" text-anchor="middle">shutdown</text>
+
+  <path class="edge" d="M700 116 L700 168"/>
+  <text class="elab" x="745" y="146">switch on</text>
+
+  <path class="edge" d="M700 226 L700 278"/>
+  <text class="elab" x="745" y="258">Enable</text>
+
+  <path class="edge" d="M700 356 L700 408"/>
+  <text class="elab" x="745" y="382">Disable</text>
+
+  <rect class="st" x="600" y="408" width="200" height="46"/>
+  <text class="title" x="700" y="434" text-anchor="middle">back to Switched On</text>
+
+  <!-- E-STOP edge from any operation -->
+  <path class="edge" d="M600 310 L520 310"/>
+  <text class="elab" x="560" y="302" text-anchor="middle">Quick-Stop</text>
+  <text class="elab" x="560" y="322" text-anchor="middle">(E-STOP · Space)</text>
+
+  <!-- Fault edge -->
+  <path class="edge" d="M600 328 Q 420 380 240 328"/>
+  <text class="elab" x="420" y="395" text-anchor="middle">drive raises fault</text>
+
+  <!-- Fault reset back to Switch On Disabled -->
+  <path class="edge" d="M240 300 L320 100"/>
+  <text class="elab" x="308" y="190">Fault reset</text>
+
+  <!-- Legend -->
+  <rect x="40" y="490" width="22" height="14" class="st"/>
+  <text class="sub" x="70" y="502">transient state</text>
+  <rect x="200" y="490" width="22" height="14" class="st op"/>
+  <text class="sub" x="230" y="502">operation enabled</text>
+  <rect x="400" y="490" width="22" height="14" class="st fault"/>
+  <text class="sub" x="430" y="502">fault</text>
+</svg>

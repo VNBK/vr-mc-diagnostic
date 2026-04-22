@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .box       { fill:#f4f6f9; stroke:#3b7ea1; stroke-width:2; rx:6; }
+    .box.ui    { fill:#eef8f2; stroke:#3b9a6d; }
+    .box.sdk   { fill:#fff4e0; stroke:#b28c32; }
+    .box.tpt   { fill:#f0e8f6; stroke:#7453a3; }
+    .box.hw    { fill:#fbe8e8; stroke:#c03030; }
+    .ttl       { font-weight:700; font-size:14px; fill:#1a1f2a; }
+    .lbl       { font-size:12px; fill:#1a1f2a; }
+    .muted     { font-size:11px; fill:#5a6370; }
+    .edge      { fill:none; stroke:#5a6370; stroke-width:1.6; marker-end:url(#arr); }
+    .dashed    { stroke-dasharray:5 4; }
+  </style>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#5a6370"/>
+    </marker>
+  </defs>
+
+  <text x="450" y="28" text-anchor="middle" font-size="17" font-weight="700" fill="#0f1a2a">
+    Architecture — vr-mc-diagnostic runtime
+  </text>
+
+  <!-- UI layer -->
+  <rect class="box ui" x="40"  y="60"  width="820" height="100" rx="8"/>
+  <text class="ttl" x="60" y="82">Qt 6 UI (MainWindow thread)</text>
+  <rect class="box ui" x="60"  y="95" width="150" height="50" rx="6"/>
+  <text class="lbl" x="135" y="120" text-anchor="middle">Toolbar · Menus</text>
+  <rect class="box ui" x="220" y="95" width="150" height="50" rx="6"/>
+  <text class="lbl" x="295" y="120" text-anchor="middle">Slave table</text>
+  <rect class="box ui" x="380" y="95" width="150" height="50" rx="6"/>
+  <text class="lbl" x="455" y="112" text-anchor="middle">Tabs / Panes</text>
+  <text class="muted" x="455" y="128" text-anchor="middle">Control · Gains · Sig gen</text>
+  <rect class="box ui" x="540" y="95" width="150" height="50" rx="6"/>
+  <text class="lbl" x="615" y="112" text-anchor="middle">Docks / Dialogs</text>
+  <text class="muted" x="615" y="128" text-anchor="middle">Profile · Tuning · PDO · Drive cfg</text>
+  <rect class="box ui" x="700" y="95" width="140" height="50" rx="6"/>
+  <text class="lbl" x="770" y="120" text-anchor="middle">Telemetry · LogDock</text>
+
+  <!-- Worker layer -->
+  <rect class="box"  x="40"  y="190" width="820" height="86" rx="8"/>
+  <text class="ttl" x="60" y="212">MasterWorker (QThread)</text>
+  <rect class="box" x="60"  y="225" width="180" height="40" rx="6"/>
+  <text class="lbl" x="150" y="250" text-anchor="middle">periodic onTick — 100 Hz</text>
+  <rect class="box" x="250" y="225" width="180" height="40" rx="6"/>
+  <text class="lbl" x="340" y="250" text-anchor="middle">SDO read / write slots</text>
+  <rect class="box" x="440" y="225" width="180" height="40" rx="6"/>
+  <text class="lbl" x="530" y="250" text-anchor="middle">PDO snapshot poll</text>
+  <rect class="box" x="630" y="225" width="210" height="40" rx="6"/>
+  <text class="lbl" x="735" y="250" text-anchor="middle">Commissioning one-shots</text>
+
+  <!-- SDK layer -->
+  <rect class="box sdk" x="40"  y="306" width="820" height="100" rx="8"/>
+  <text class="ttl" x="60" y="328">vr-mc-sdk (C, re-used via add_subdirectory)</text>
+  <rect class="box sdk" x="60"  y="340" width="180" height="55" rx="6"/>
+  <text class="lbl" x="150" y="361" text-anchor="middle">master_mgr</text>
+  <text class="muted" x="150" y="378" text-anchor="middle">slave registry · fan-out</text>
+  <rect class="box sdk" x="250" y="340" width="180" height="55" rx="6"/>
+  <text class="lbl" x="340" y="361" text-anchor="middle">motor_drive_interface</text>
+  <text class="muted" x="340" y="378" text-anchor="middle">abstract drive</text>
+  <rect class="box sdk" x="440" y="340" width="180" height="55" rx="6"/>
+  <text class="lbl" x="530" y="361" text-anchor="middle">cia402_master</text>
+  <text class="muted" x="530" y="378" text-anchor="middle">state + CiA 402 OD</text>
+  <rect class="box sdk" x="630" y="340" width="210" height="55" rx="6"/>
+  <text class="lbl" x="735" y="361" text-anchor="middle">can_fd_pdo · co_fd_usdo</text>
+  <text class="muted" x="735" y="378" text-anchor="middle">PDO layer · SDO client</text>
+
+  <!-- Transport layer -->
+  <rect class="box tpt" x="40"  y="436" width="820" height="60" rx="8"/>
+  <text class="ttl" x="60" y="458">hal_can transport (vtable)</text>
+  <rect class="box tpt" x="400" y="448" width="200" height="38" rx="6"/>
+  <text class="lbl" x="500" y="472" text-anchor="middle">hal_can_udp — loopback sim</text>
+  <rect class="box tpt" x="615" y="448" width="200" height="38" rx="6"/>
+  <text class="lbl" x="715" y="472" text-anchor="middle">hal_can_zlg — USB-CANFD</text>
+
+  <!-- Edges -->
+  <path class="edge" d="M450 160 L450 188"/>
+  <path class="edge" d="M450 276 L450 304"/>
+  <path class="edge" d="M450 406 L450 434"/>
+</svg>

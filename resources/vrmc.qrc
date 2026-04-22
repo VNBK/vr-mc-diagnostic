@@ -1,0 +1,5 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/brand">
+    <file alias="vinrobotic.png">vinrobotic.png</file>
+</qresource>
+</RCC>
