@@ -45,6 +45,15 @@ QVariant SlaveTableModel::data(const QModelIndex& idx, int role) const
     case ColPosition: return QString::number(s.position, 'f', 4);
     case ColVelocity: return QString::number(s.velocity, 'f', 4);
     case ColTorque:   return QString::number(s.torque,   'f', 4);
+    case ColCurrent:  return QString::number(s.current,     'f', 3);
+    case ColTemperature: return QString::number(s.temperature, 'f', 1);
+    case ColError:
+        /* Hide stale 0x0000 unless PDO is alive; otherwise the column
+         * implies "no fault" even when the wire hasn't actually
+         * reported. Once a TPDO has landed (pdoFresh) the 0 means
+         * "drive is reporting clean". */
+        if (!s.pdoFresh){ return QStringLiteral("—"); }
+        return QStringLiteral("0x%1").arg(s.errorCode, 4, 16, QChar('0'));
     }
     return {};
 }
@@ -62,6 +71,9 @@ QVariant SlaveTableModel::headerData(int section, Qt::Orientation o, int role) c
     case ColPosition: return QStringLiteral("pos (rad)");
     case ColVelocity: return QStringLiteral("vel (rad/s)");
     case ColTorque:   return QStringLiteral("trq (Nm)");
+    case ColCurrent:    return QStringLiteral("I (A)");
+    case ColTemperature:return QStringLiteral("T (°C)");
+    case ColError:      return QStringLiteral("err");
     }
     return {};
 }

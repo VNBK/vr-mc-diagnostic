@@ -1,10 +1,11 @@
 #include "CanBackend.hpp"
-#include "zlg/hal_can_zlg.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 extern "C" {
 #include "master_mgr.h"
@@ -16,6 +17,7 @@ extern "C" {
 #include "can_fd_pdo.h"
 #include "hal_can.h"
 #include "hal_can_udp.h"
+#include "hal_can_zlg.h"               /* SDK platform_linux: multi-endpoint */
 #include "hal_uart.h"
 #include "hal_uart_linux.h"
 #include "motor_drive_feetech_intf.h"
@@ -48,21 +50,60 @@ struct CanBackend::Slot
     co_fd_usdo_sync_ctx_t  sync_ctx {};
     char                   name[32]  = {};
     PdoSlot                pdo;
+
+    /* Per-slot PDO TX cache.
+     *
+     * Master-side controlword + target_{pos,vel,torque} are kept here
+     * so MasterWorker::onTick can stream a keep-alive RPDO every cycle
+     * — the sim adopts the OD targets only on RPDO arrival AND only
+     * when its CiA-402 state is OPERATION_ENABLED, so without the
+     * keep-alive the vmotor never moves even after the slider sends a
+     * setpoint via the SDO path. @c tx_active gates whether the
+     * keep-alive fires: stays @c false through the bring-up walk so
+     * we don't fight cia402_master writing 0x06 / 0x07 / 0x0F. Flipped
+     * to @c true by armPdoTx() after a successful bring-up, and back
+     * to @c false on disable / quick-stop. */
+    std::atomic<uint16_t>  tx_controlword{0};
+    std::atomic<int32_t>   tx_target_pos{0};
+    std::atomic<int32_t>   tx_target_vel{0};
+    std::atomic<int16_t>   tx_target_torque{0};
+    std::atomic<bool>      tx_active{false};
 };
 
-/* TPDO1 from the CiA 402 sim:
+/* TPDO1 from the CiA 402 sim (slave -> master, COB-ID 0x180+id):
  *   [0..1]   statusword       (uint16, little-endian)
  *   [2..5]   position_actual  (int32)
  *   [6..9]   velocity_actual  (int32)
  *   [10..11] torque_actual    (int16, per-mille of rated)
  *   [12..13] error_code       (uint16)
+ * Layout copied from motor_drive_master.c's MASTER_PDO_TPDO_BYTES path.
  */
-static constexpr uint8_t kPdoBytes = 14;
+static constexpr uint8_t kTPdoBytes = 14;
+
+/* RPDO1 from master to sim (master -> slave, COB-ID 0x200+id):
+ *   [0..1]   controlword      (uint16, little-endian)
+ *   [2..5]   target_position  (int32)
+ *   [6..9]   target_velocity  (int32)
+ *   [10..11] target_torque    (int16)
+ * Layout matches motor_drive_master.c's MASTER_PDO_RPDO_BYTES + the
+ * sim's RPDO1 mapping registered in cia402_drive_sim.c. The diagnostic
+ * sends this once per MasterWorker tick so the sim's event-driven TPDO
+ * response fires alongside its 10 Hz heartbeat — see CanBackend::pdoSend.
+ */
+static constexpr uint8_t kRPdoBytes = 12;
 
 static uint16_t le16(const uint8_t* p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }
 static uint32_t le32(const uint8_t* p) {
     return uint32_t(p[0])       | (uint32_t(p[1]) << 8) |
            (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+static void pack_le16(uint8_t* p, uint16_t v) {
+    p[0] = uint8_t(v); p[1] = uint8_t(v >> 8);
+}
+static void pack_le32(uint8_t* p, uint32_t v) {
+    p[0] = uint8_t(v);        p[1] = uint8_t(v >> 8);
+    p[2] = uint8_t(v >> 16);  p[3] = uint8_t(v >> 24);
 }
 
 /* Static RPDO callback. arg is a PdoSlot* (file-scope struct, not the
@@ -72,7 +113,7 @@ static void rpdoRx(uint32_t /*cob_id*/, const uint8_t* data,
                    uint8_t len, void* arg)
 {
     auto* p = static_cast<PdoSlot*>(arg);
-    if (!p || !data || len < kPdoBytes){ return; }
+    if (!p || !data || len < kTPdoBytes){ return; }
     std::lock_guard<std::mutex> lk(p->mu);
     p->statusword = le16(data + 0);
     p->position   = static_cast<int32_t>(le32(data + 2));
@@ -126,12 +167,23 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
         break;
     }
     case CanKind::Zlg: {
-        /* ZLG: only one consumer per channel today; PDO stays disabled. */
-        m_canCli = hal_can_zlg_create(cfg.zlgLibPath.toStdString(),
-                                      cfg.zlgChannel,
-                                      cfg.zlgBitrate,
-                                      cfg.zlgFdBitrate);
-        if (!m_canCli){
+        /* SDK's hal_can_zlg shares a channel between multiple endpoints
+         * via internal refcount on (device, channel) tuples, so we can
+         * create separate USDO-client and PDO endpoints exactly the way
+         * the UDP branch does — and the way motor_drive_master.c does
+         * against real hardware. No more "single consumer per channel"
+         * limitation that forced PDO off on ZLG. */
+        hal_can_zlg_cfg_t zcfg{};
+        zcfg.device_type       = HAL_CAN_ZLG_DEFAULT_DEVICE_TYPE;
+        zcfg.device_index      = HAL_CAN_ZLG_DEFAULT_DEVICE_INDEX;
+        zcfg.channel_index     = cfg.zlgChannel;
+        zcfg.arb_baud_bps      = cfg.zlgBitrate;
+        zcfg.data_baud_bps     = cfg.zlgFdBitrate;
+        zcfg.enable_terminator = 1;
+        zcfg.iso_canfd         = 1;
+        m_canCli = hal_can_zlg_create(&zcfg);
+        m_canPdo = hal_can_zlg_create(&zcfg);
+        if (!m_canCli || !m_canPdo){
             if (err){
                 *err = QStringLiteral("hal_can_zlg_create failed "
                                       "(libcontrolcanfd.so missing or "
@@ -139,9 +191,6 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
             }
             close();
             return false;
-        }
-        if (m_canCli->proc && m_canCli->proc->start){
-            m_canCli->proc->start(m_canCli);   /* spawn poll thread */
         }
         break;
     }
@@ -308,7 +357,11 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
      * worker poll the cache at its UI tick rate. PDO uses its own
      * hal_can endpoint so it doesn't steal the USDO client's RX cb. */
     if (!m_canPdo){
-        return true;   /* ZLG: PDO unsupported in V0; SDO-only is fine */
+        /* Only reachable for UART transports (Feetech/Dynamixel), which
+         * don't allocate a CAN endpoint and don't have PDOs. CAN paths
+         * (UDP / ZLG) both create m_canPdo above, so they fall through
+         * to the per-slave RPDO subscription below. */
+        return true;
     }
     m_pdo = can_fd_pdo_create(m_canPdo, /*od=*/nullptr);
     if (!m_pdo){
@@ -319,10 +372,33 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
     for (uint8_t i = 0; i < cfg.count; ++i){
         Slot* slot = m_slots[i];
         slot->pdo_slot = i;
+
+        /* Outgoing master -> slave RPDO (cob 0x200+id, 12 B). Mirrors
+         * motor_drive_master.c:710-717. Even if the diagnostic doesn't
+         * actively scrub setpoints at the rate of a real controller,
+         * registering the TPDO slot is what lets the PDO state machine
+         * pair RxPDO callbacks with their TxPDO siblings and advance
+         * cleanly on each cycle. */
+        co_tpdo_config_t tcfg{};
+        tcfg.cob_id             = 0x200u + slot->node_id;
+        tcfg.trans_type         = CO_PDO_TX_ASYNC_MFR;
+        tcfg.data_len           = kRPdoBytes;
+        tcfg.inhibit_time_100us = 0;
+        tcfg.event_timer_ms     = 0;
+        if (can_fd_tpdo_configure(m_pdo, slot->pdo_slot, &tcfg) != 0){
+            if (err){
+                *err = QStringLiteral("can_fd_tpdo_configure failed for slot %1")
+                           .arg(i);
+            }
+            close();
+            return false;
+        }
+
+        /* Incoming slave -> master TPDO (cob 0x180+id, 14 B). */
         co_rpdo_config_t rcfg{};
         rcfg.cob_id     = 0x180u + slot->node_id;
         rcfg.trans_type = CO_PDO_TX_ASYNC_MFR;
-        rcfg.data_len   = kPdoBytes;
+        rcfg.data_len   = kTPdoBytes;
         rcfg.cb         = rpdoRx;
         rcfg.arg        = &slot->pdo;
         if (can_fd_rpdo_configure(m_pdo, slot->pdo_slot, &rcfg) != 0){
@@ -332,6 +408,50 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
             }
             close();
             return false;
+        }
+    }
+
+    /* Probe every slave by waiting for at least one TPDO heartbeat
+     * before declaring Connect successful. Otherwise the diagnostic
+     * happily "connects" against an empty bus — sockets bind, PDO
+     * slots register, master_mgr accepts the slaves, but the slave
+     * side is silent. TPDO heartbeat probing works on any CiA-402
+     * conformant slave (statusword TPDO is emitted at least at the
+     * heartbeat rate, 10 Hz on cia402_drive_sim) without requiring
+     * any specific OD object — an earlier attempt at SDO probing
+     * 0x1000 (Device Type) misfired because the simulator's OD does
+     * not expose it. Wait up to kProbeTimeoutMs (~250 ms, well above
+     * the 100 ms heartbeat) and pump the transport in 5 ms slices so
+     * the RPDO callback can fire.
+     */
+    {
+        constexpr int kProbeTimeoutMs = 250;
+        constexpr int kSliceMs        = 5;
+        const int     slices          = kProbeTimeoutMs / kSliceMs;
+        for (int s = 0; s < slices; ++s){
+            pump();
+            bool all_seen = true;
+            for (Slot* slot : m_slots){
+                if (!slot->pdo.fresh.load(std::memory_order_acquire)){
+                    all_seen = false;
+                    break;
+                }
+            }
+            if (all_seen){ break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kSliceMs));
+        }
+        for (Slot* slot : m_slots){
+            if (!slot->pdo.fresh.load(std::memory_order_acquire)){
+                if (err){
+                    *err = QStringLiteral(
+                        "no slave responded at node %1 within %2 ms "
+                        "(no TPDO heartbeat). Check that the simulator/"
+                        "drive is running before Connect.")
+                        .arg(slot->node_id).arg(kProbeTimeoutMs);
+                }
+                close();
+                return false;
+            }
         }
     }
     return true;
@@ -379,12 +499,17 @@ void CanBackend::close()
 
 void CanBackend::pump()
 {
-    /* UDP delivers frames only when polled; ZLG runs its own RX thread
-     * and pushes via the rx callback. Both endpoints need a poll, then
-     * the PDO + USDO state machines tick regardless of transport. */
+    /* Both UDP and the SDK's ZLG backend deliver frames only when
+     * polled (the SDK's hal_can_zlg has no background thread — same
+     * cadence model as hal_can_udp). Poll both endpoints so the
+     * USDO-client and PDO socket each drain. Then the PDO + USDO
+     * state machines tick regardless of transport. */
     if (m_kind == CanKind::Udp){
         if (m_canCli){ hal_can_udp_poll(m_canCli); }
         if (m_canPdo){ hal_can_udp_poll(m_canPdo); }
+    } else if (m_kind == CanKind::Zlg){
+        if (m_canCli){ hal_can_zlg_poll(m_canCli); }
+        if (m_canPdo){ hal_can_zlg_poll(m_canPdo); }
     }
     if (m_pdo)   { can_fd_pdo_process(m_pdo, /*dt_us=*/1000); }
     if (m_client){ co_fd_usdo_client_process(m_client, 1); }
@@ -531,6 +656,60 @@ bool CanBackend::getPdo(uint32_t idx, PdoFrame* out) const
     out->rx_count   = slot->pdo.rx_count.load(std::memory_order_relaxed);
     out->fresh      = true;
     return true;
+}
+
+int CanBackend::pdoSend(uint32_t idx, uint16_t controlword,
+                        int32_t target_pos, int32_t target_vel,
+                        int16_t target_torque)
+{
+    if (!m_pdo || idx >= m_slots.size()){ return -1; }
+    Slot* slot = m_slots[idx];
+
+    uint8_t buf[kRPdoBytes];
+    pack_le16(buf + 0,  controlword);
+    pack_le32(buf + 2,  static_cast<uint32_t>(target_pos));
+    pack_le32(buf + 6,  static_cast<uint32_t>(target_vel));
+    pack_le16(buf + 10, static_cast<uint16_t>(target_torque));
+
+    int rc = can_fd_tpdo_write(m_pdo, slot->pdo_slot, buf, sizeof(buf));
+    if (rc != 0){ return rc; }
+    return can_fd_tpdo_trigger(m_pdo, slot->pdo_slot);
+}
+
+void CanBackend::armPdoTx(uint32_t idx, uint16_t controlword)
+{
+    if (idx >= m_slots.size()){ return; }
+    Slot* slot = m_slots[idx];
+    slot->tx_controlword.store(controlword, std::memory_order_release);
+    slot->tx_active     .store(true,         std::memory_order_release);
+}
+
+void CanBackend::disarmPdoTx(uint32_t idx)
+{
+    if (idx >= m_slots.size()){ return; }
+    m_slots[idx]->tx_active.store(false, std::memory_order_release);
+}
+
+void CanBackend::setTarget(uint32_t idx, int32_t pos, int32_t vel, int16_t torque)
+{
+    if (idx >= m_slots.size()){ return; }
+    Slot* slot = m_slots[idx];
+    slot->tx_target_pos   .store(pos,    std::memory_order_release);
+    slot->tx_target_vel   .store(vel,    std::memory_order_release);
+    slot->tx_target_torque.store(torque, std::memory_order_release);
+}
+
+void CanBackend::pdoTick()
+{
+    if (!m_pdo){ return; }
+    for (Slot* slot : m_slots){
+        if (!slot->tx_active.load(std::memory_order_acquire)){ continue; }
+        (void)pdoSend(/*idx=*/static_cast<uint32_t>(slot->pdo_slot),
+                      slot->tx_controlword .load(std::memory_order_acquire),
+                      slot->tx_target_pos  .load(std::memory_order_acquire),
+                      slot->tx_target_vel  .load(std::memory_order_acquire),
+                      slot->tx_target_torque.load(std::memory_order_acquire));
+    }
 }
 
 }  // namespace vrmc

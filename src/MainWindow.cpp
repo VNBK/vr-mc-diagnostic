@@ -1,5 +1,7 @@
 #include "MainWindow.hpp"
 
+#include <algorithm>
+
 #include "ConnectionDialog.hpp"
 #include "DriveConfigDialog.hpp"
 
@@ -7,6 +9,8 @@
 #include "GainEditor.hpp"
 #include "FirmwareUpgradeDialog.hpp"
 #include "JointControlPanel.hpp"
+#include "MotorView.hpp"
+#include "SlavePickerBar.hpp"
 #include "LogDock.hpp"
 #include "MotorProfile.hpp"
 #include "MotorProfileEditor.hpp"
@@ -18,12 +22,19 @@
 #include "TuningPane.hpp"
 
 #include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QDir>
 #include <QDockWidget>
+#include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QProcess>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
@@ -36,10 +47,12 @@
 #include <QShortcut>
 #include <QSizePolicy>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableView>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
@@ -51,7 +64,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 {
     setWindowTitle(tr("VR Motor Control Diagnostic Tool"));
     setWindowIcon(QIcon(QStringLiteral(":/brand/vinrobotic.png")));
-    resize(1200, 800);
 
     /* Worker lives on its own thread. Construct it there so QTimer
      * fires on the worker's event loop, not the UI's. */
@@ -62,10 +74,34 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 
     buildUi();
     wireWorker();
+
+    /* Size the window so every child widget fits without clipping.
+     * The earlier hard 1200×800 default was too tight once the slave
+     * table grew to 11 columns and the per-slave panels expanded.
+     * adjustSize() asks the layout what it actually needs; we then
+     * floor it at 1500×900 so a sparse first-launch (no slaves yet)
+     * still gives the operator room to work, and use the layout's
+     * minimum as the window minimum so the user can't shrink below
+     * a usable size. */
+    adjustSize();
+    const QSize hinted = sizeHint();
+    const int   w      = std::max(1500, hinted.width());
+    const int   h      = std::max(900,  hinted.height());
+    resize(w, h);
+    setMinimumSize(std::min(1200, hinted.width()),
+                   std::min(750,  hinted.height()));
 }
 
 MainWindow::~MainWindow()
 {
+    /* Kill any demo subprocesses we spawned so they don't outlive the
+     * GUI as orphan listeners on the multicast group. */
+    for (auto* p : m_demoProcs){
+        if (p && p->state() != QProcess::NotRunning){
+            p->kill();
+            p->waitForFinished(200);
+        }
+    }
     m_workerThread.quit();
     m_workerThread.wait();
 }
@@ -76,7 +112,19 @@ void MainWindow::buildUi()
     m_model = new SlaveTableModel(this);
     m_table = new QTableView;
     m_table->setModel(m_model);
-    m_table->horizontalHeader()->setStretchLastSection(true);
+    /* Fit every column to its content so all 11 columns (idx / id /
+     * name / state / online / pos / vel / trq / I / T / err) are
+     * visible without horizontal scroll. setStretchLastSection used to
+     * push the last column to fill remaining width, but that left wide
+     * numeric columns (pos / vel) truncated on small screens. The
+     * fit-to-contents mode resizes on every model update; a small CPU
+     * cost for a much better default layout. The "name" column is
+     * still Interactive so the operator can drag it wider for long
+     * names. */
+    auto* hh = m_table->horizontalHeader();
+    hh->setSectionResizeMode(QHeaderView::ResizeToContents);
+    hh->setSectionResizeMode(SlaveTableModel::ColName, QHeaderView::Interactive);
+    hh->setStretchLastSection(false);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -104,7 +152,9 @@ void MainWindow::buildUi()
     m_profileView->setParams(m_motorParams);
 
     /* Detachable panes. Created hidden + floating so the main window
-     * comes up uncluttered; toolbar actions bring them out. */
+     * comes up uncluttered; toolbar actions bring them out. The
+     * motor profile no longer gets its own dock because it lives
+     * inline in the top 3-pane split (see below). */
     auto makeDock = [this](const QString& title, const QString& obj,
                            QWidget* w, const QSize& sz) {
         auto* dock = new QDockWidget(title, this);
@@ -117,26 +167,88 @@ void MainWindow::buildUi()
         dock->hide();
         return dock;
     };
-    m_profileDock = makeDock(tr("Motor profile"), QStringLiteral("ProfileDock"),
-                             m_profileView, QSize(420, 520));
     m_tuningDock  = makeDock(tr("Tuning"),        QStringLiteral("TuningDock"),
                              m_tuning,      QSize(720, 520));
     m_pdoMapDock  = makeDock(tr("PDO map"),       QStringLiteral("PdoMapDock"),
                              m_pdoMap,      QSize(520, 520));
 
+    /* Wrap each major pane in a QFrame so visual boundaries match the
+     * functional grouping. Helper avoids hand-repeating the same
+     * StyledPanel/Sunken/1-px line config. */
+    auto wrapFrame = [](QWidget* inner) -> QFrame* {
+        auto* f = new QFrame;
+        f->setFrameShape(QFrame::StyledPanel);
+        f->setFrameShadow(QFrame::Sunken);
+        f->setLineWidth(1);
+        auto* l = new QVBoxLayout(f);
+        l->setContentsMargins(0, 0, 0, 0);
+        l->setSpacing(0);
+        l->addWidget(inner);
+        return f;
+    };
+
+    /* Bottom row: framed Control-tabs on the left, telemetry chart on
+     * the right (TelemetryWidget already has its own internal frame). */
     auto* bottomSplit = new QSplitter(Qt::Horizontal);
-    bottomSplit->addWidget(m_leftTabs);
+    bottomSplit->addWidget(wrapFrame(m_leftTabs));
     bottomSplit->addWidget(m_telemetry);
     bottomSplit->setStretchFactor(0, 0);
     bottomSplit->setStretchFactor(1, 1);
 
+    /* Top row: 3-pane horizontal split.
+     *   left   = slave list (the full table, always visible)
+     *   centre = MotorView dial
+     *   right  = motor profile view (toggleable from toolbar/View menu)
+     * Each wrapped in its own frame for clean visual grouping. The
+     * profile frame is captured so the toolbar toggle (built later
+     * in buildToolbar) can show/hide it. */
+    m_motorView    = new MotorView;
+    m_profileFrame = wrapFrame(m_profileView);
+    auto* topSplit = new QSplitter(Qt::Horizontal);
+    topSplit->addWidget(wrapFrame(m_table));
+    topSplit->addWidget(wrapFrame(m_motorView));
+    topSplit->addWidget(m_profileFrame);
+    topSplit->setStretchFactor(0, 1);
+    topSplit->setStretchFactor(1, 1);
+    topSplit->setStretchFactor(2, 1);
+    topSplit->setSizes({320, 320, 320});
+
+    /* Picker bar above everything — slim row with combo + state strip.
+     * Expand-grid button hidden: the table is now a permanent member
+     * of the top split, so there's nothing to expand/collapse. */
+    m_picker = new SlavePickerBar;
+    m_picker->setExpandButtonVisible(false);
+
+    /* m_tableHost was the collapsible host for the (formerly hidden)
+     * table; now the table lives directly in the top-row left pane.
+     * Keep the pointer null so onDisconnected etc. skip cleanly. */
+    m_tableHost = nullptr;
+
     auto* splitter = new QSplitter(Qt::Vertical);
-    splitter->addWidget(m_table);
+    splitter->addWidget(topSplit);
     splitter->addWidget(bottomSplit);
     splitter->setStretchFactor(0, 1);
-    splitter->setStretchFactor(1, 2);
+    splitter->setStretchFactor(1, 1);
 
-    setCentralWidget(splitter);
+    auto* central = new QWidget;
+    auto* centralLay = new QVBoxLayout(central);
+    centralLay->setContentsMargins(0, 0, 0, 0);
+    centralLay->setSpacing(0);
+    centralLay->addWidget(m_picker);
+    centralLay->addWidget(splitter, 1);
+    setCentralWidget(central);
+
+    /* Picker wiring — fold its combo into the existing table selection
+     * model so every per-slave panel reacts uniformly regardless of
+     * whether the operator picked via the picker combobox or by
+     * clicking a row in the (now always-visible) table. */
+    m_picker->bindModel(m_model, m_table->selectionModel());
+    connect(m_picker, &SlavePickerBar::slaveSelected, this, [this](int row){
+        if (m_table && row >= 0){ m_table->selectRow(row); }
+    });
+    /* Expand-grid button no longer toggles anything (the table is
+     * always visible inline); the picker bar hides it via its
+     * setExpandButtonVisible(false) call below. */
 
     /* --- Log dock. */
     m_log = new LogDock(this);
@@ -304,7 +416,7 @@ void MainWindow::buildMenus()
 
     /* --- Data --- */
     auto* dataMenu = menuBar()->addMenu(tr("D&ata"));
-    m_recordAct = new QAction(makeRecordIcon(), tr("&Record telemetry"), this);
+    m_recordAct = new QAction(makeRecordIcon(), tr("&Record"), this);
     m_recordAct->setCheckable(true);
     m_recordAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
     connect(m_recordAct, &QAction::toggled, this, &MainWindow::onToggleRecording);
@@ -324,7 +436,15 @@ void MainWindow::buildMenus()
 
     /* --- View --- */
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
-    viewMenu->addAction(m_profileDock->toggleViewAction());
+    /* Profile is inline but the operator still wants a quick toggle
+     * to reclaim the screen width when they're not editing it. */
+    m_profileAct = new QAction(tr("Motor &Profile"), this);
+    m_profileAct->setCheckable(true);
+    m_profileAct->setChecked(true);
+    connect(m_profileAct, &QAction::toggled, this, [this](bool on){
+        if (m_profileFrame){ m_profileFrame->setVisible(on); }
+    });
+    viewMenu->addAction(m_profileAct);
     viewMenu->addAction(m_tuningDock->toggleViewAction());
     viewMenu->addAction(m_pdoMapDock->toggleViewAction());
     viewMenu->addSeparator();
@@ -338,7 +458,20 @@ void MainWindow::buildMenus()
     m_docsAct->setShortcut(QKeySequence::HelpContents);
     connect(m_docsAct,  &QAction::triggered, this, &MainWindow::onDocumentation);
     connect(m_aboutAct, &QAction::triggered, this, &MainWindow::onAbout);
+
+    /* Demo — spawn N cia402_drive_sim processes from inside the
+     * diagnostic so the operator doesn't have to drop to a terminal
+     * to bring up a fake bus. Stop counterpart kills the children. */
+    m_demoStartAct = new QAction(tr("Start &demo…"), this);
+    m_demoStopAct  = new QAction(tr("Stop demo"),    this);
+    m_demoStopAct->setEnabled(false);
+    connect(m_demoStartAct, &QAction::triggered, this, &MainWindow::onStartDemo);
+    connect(m_demoStopAct,  &QAction::triggered, this, &MainWindow::onStopDemo);
+
     helpMenu->addAction(m_docsAct);
+    helpMenu->addSeparator();
+    helpMenu->addAction(m_demoStartAct);
+    helpMenu->addAction(m_demoStopAct);
     helpMenu->addSeparator();
     helpMenu->addAction(m_aboutAct);
 }
@@ -363,24 +496,28 @@ void MainWindow::buildToolbar()
     toolbar->addSeparator();
 
     /* View group: toggle detachable panes. Qt's toggleViewAction keeps
-     * the checkbox state in sync with the dock's visibility. */
-    auto* profileAct = m_profileDock->toggleViewAction();
+     * the checkbox state in sync with the dock's visibility. Motor
+     * profile is inline; its action toggles the visibility of the
+     * inline frame on the top-right of the central widget. */
+    if (m_profileAct){
+        m_profileAct->setText(tr("Profile"));
+        m_profileAct->setIcon(makeWindowIcon(QColor("#3b9a6d")));
+        toolbar->addAction(m_profileAct);
+    }
     auto* tuningAct  = m_tuningDock->toggleViewAction();
     auto* pdoMapAct  = m_pdoMapDock->toggleViewAction();
-    profileAct->setText(tr("Profile"));
     tuningAct->setText(tr("Tuning"));
     pdoMapAct->setText(tr("PDO map"));
-    profileAct->setIcon(makeWindowIcon(QColor("#3b9a6d")));
     tuningAct->setIcon(makeWindowIcon(QColor("#b28c32")));
     pdoMapAct->setIcon(makeWindowIcon(QColor("#3b7ea1")));
-    toolbar->addAction(profileAct);
     toolbar->addAction(tuningAct);
     toolbar->addAction(pdoMapAct);
     toolbar->addSeparator();
 
-    /* Drive group. */
+    /* Drive group. Firmware-upgrade lives in the Drive menu only — the
+     * toolbar slot was removed to keep the destructive flash dialog
+     * from being one accidental click away. */
     toolbar->addAction(m_configureDriveAct);
-    toolbar->addAction(m_uploadFirmwareAct);
     toolbar->addSeparator();
 
     /* Data group. */
@@ -388,8 +525,9 @@ void MainWindow::buildToolbar()
     toolbar->addAction(m_clearChartsAct);
     toolbar->addSeparator();
 
-    /* Help. */
-    toolbar->addAction(m_aboutAct);
+    /* Help → About lives in the Help menu only — the toolbar slot was
+     * removed because operators kept clicking it by accident while
+     * reaching for the adjacent record button. */
 
     /* Push the E-STOP to the far right so it dominates the toolbar. */
     auto* spacer = new QWidget(toolbar);
@@ -446,12 +584,22 @@ void MainWindow::wireWorker()
             m_worker,  &MasterWorker::enableOne,    Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::disableRequested,
             m_worker,  &MasterWorker::disableOne,   Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::quickStopRequested,
+            m_worker,  &MasterWorker::quickStopOne, Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::faultResetRequested,
             m_worker,  &MasterWorker::faultReset,   Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::modeRequested,
             m_worker,  &MasterWorker::setMode,      Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::targetRequested,
             m_worker,  &MasterWorker::setTarget,    Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::walkControlwordRequested,
+            m_worker,  &MasterWorker::walkControlwordOne,
+            Qt::QueuedConnection);
+    /* Push the master's cached controlword back to the panel so the
+     * readout strip can mirror what's being streamed for the selected
+     * slave. */
+    connect(m_worker, &MasterWorker::controlwordCached,
+            m_control, &JointControlPanel::onControlwordCached);
 
     /* GainEditor -> worker + worker -> GainEditor. */
     connect(m_gains,  &GainEditor::readGainRequested,
@@ -534,6 +682,36 @@ void MainWindow::onDisconnected()
     m_gen->setActiveSlave(-1);
     m_tuning->setActiveSlave(-1);
     m_telemetry->clear();
+    if (m_motorView){ m_motorView->setActiveSlave(-1); }
+
+    /* Clear the slave table + selection so the next connect starts
+     * from a clean state. Without this, the model keeps the previous
+     * session's rows; on reconnect with the same slave count
+     * SlaveTableModel::update takes the dataChanged fast path (no
+     * resetModel), the lingering selection points at the same row,
+     * selectionChanged never re-fires, and setActiveSlave(idx) never
+     * runs — leaving every per-slave panel greyed out. */
+    if (m_table && m_table->selectionModel()){
+        m_table->selectionModel()->clearSelection();
+    }
+    m_model->update({});
+
+    /* Close any in-progress CSV recording so it doesn't sit open with
+     * stale state across a reconnect. Pop the toolbar button too. */
+    if (m_recordAct && m_recordAct->isChecked()){
+        m_recordAct->setChecked(false);   /* triggers onToggleRecording(false) */
+    }
+
+    /* If a demo was running, terminate its sim processes so the Help
+     * menu actions reflect reality (Start re-enabled, Stop greyed).
+     * The operator clicked Disconnect — they don't expect orphan sim
+     * processes to keep running silently on the multicast group.
+     * onStopDemo is idempotent (no-ops when m_demoProcs is empty) so
+     * the more usual "operator clicked Stop demo" path which calls
+     * disconnect_ → onDisconnected → here doesn't loop. */
+    if (!m_demoProcs.isEmpty()){
+        onStopDemo();
+    }
 }
 
 void MainWindow::onError(const QString& msg)
@@ -551,12 +729,35 @@ void MainWindow::onSnapshots(QVector<vrmc::SlaveSnapshot> snaps)
     m_latestSnaps = snaps;
     m_model->update(snaps);
     m_telemetry->push(snaps);
+    m_control->onSnapshots(snaps);
+    if (m_motorView){ m_motorView->onSnapshots(snaps); }
+    if (m_picker)   { m_picker   ->onSnapshots(snaps); }
     m_tuning->step()->onSnapshots(snaps);
     m_tuning->bode()->onSnapshots(snaps);
     m_pdoMap->onSnapshots(snaps);
     if (m_driveCfgDlg && m_driveCfgDlg->isVisible()){
         m_driveCfgDlg->onSnapshots(snaps);
     }
+    recordSnapshots(snaps);
+
+    /* Default-select the first slave the moment any data lands and no
+     * row is yet selected. Without this, the per-slave panels (Control,
+     * Gains, Telemetry, PDO map) sit empty after a fresh Connect — the
+     * operator always wants the first device immediately. Same logic
+     * the --auto-connect path runs at line 763. */
+    if (m_table && m_model && m_model->rowCount() > 0
+        && m_table->selectionModel()
+        && m_table->selectionModel()->selectedRows().isEmpty()){
+        m_table->selectRow(0);
+    }
+
+    /* Force a one-shot column re-fit on every snapshot. The
+     * setSectionResizeMode(ResizeToContents) below normally resizes on
+     * model resets, but a snapshot of the same row count goes through
+     * the dataChanged fast path which doesn't always re-measure column
+     * widths. resizeColumnsToContents() is cheap for ~10 rows and
+     * guarantees every column hugs its data. */
+    if (m_table){ m_table->resizeColumnsToContents(); }
 }
 
 void MainWindow::onSelectionChanged()
@@ -568,6 +769,7 @@ void MainWindow::onSelectionChanged()
         m_gen->setActiveSlave(-1);
         m_telemetry->setActiveSlave(-1);
         m_pdoMap->setActiveSlave(-1);
+        if (m_motorView){ m_motorView->setActiveSlave(-1); }
         return;
     }
     const int row = rows.first().row();
@@ -581,6 +783,7 @@ void MainWindow::onSelectionChanged()
     m_tuning->setActiveSlave(idx, nm);
     m_telemetry->setActiveSlave(idx);
     m_pdoMap->setActiveSlave(idx, nm);
+    if (m_motorView){ m_motorView->setActiveSlave(idx, nm); }
 }
 
 /* ==================================================================== *
@@ -727,7 +930,9 @@ void MainWindow::showDocPanel(const QString& name)
     } else if (name == QLatin1String("tuning")){
         dockInline(m_tuningDock, Qt::RightDockWidgetArea);
     } else if (name == QLatin1String("profile")){
-        dockInline(m_profileDock, Qt::RightDockWidgetArea);
+        /* No-op: motor profile is permanently inline now. The CLI
+         * panel-name is kept for back-compat with --show-panel calls
+         * that still pass "profile". */
     } else if (name == QLatin1String("select-first")){
         if (m_table && m_model && m_model->rowCount() > 0){
             m_table->selectRow(0);
@@ -815,6 +1020,17 @@ void MainWindow::onConfigureDrive()
                 m_driveCfgDlg, &DriveConfigDialog::onReadResult);
         connect(m_worker,      &MasterWorker::driveConfigWritten,
                 m_driveCfgDlg, &DriveConfigDialog::onWriteResult);
+        /* Custom-SDO tab plumbing — operator types an OD entry on the
+         * dialog's "Custom SDO" tab and the worker pokes it via the
+         * existing CanBackend SDO helpers. */
+        connect(m_driveCfgDlg, &DriveConfigDialog::customSdoReadRequested,
+                m_worker,      &MasterWorker::customSdoRead,
+                Qt::QueuedConnection);
+        connect(m_driveCfgDlg, &DriveConfigDialog::customSdoWriteRequested,
+                m_worker,      &MasterWorker::customSdoWrite,
+                Qt::QueuedConnection);
+        connect(m_worker,      &MasterWorker::customSdoDone,
+                m_driveCfgDlg, &DriveConfigDialog::onCustomSdoDone);
         connect(m_worker,      &MasterWorker::calibrationDone,
                 m_driveCfgDlg, &DriveConfigDialog::onCalibrationDone);
     }
@@ -833,11 +1049,78 @@ void MainWindow::onConfigureDrive()
 void MainWindow::onToggleRecording(bool on)
 {
     if (on){
-        m_log->appendInfo(tr("recording ON (stub)"));
+        /* Prompt for a destination path on every record-start. Default
+         * filename uses a timestamp so successive recordings don't
+         * silently overwrite each other. */
+        const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
+        const QString defaultName = QStringLiteral("vrmc_record_%1.csv").arg(stamp);
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Record telemetry to CSV"),
+            defaultName,
+            tr("CSV (*.csv);;All files (*)"));
+        if (path.isEmpty()){
+            /* User cancelled — pop the toolbar action back out. */
+            m_recordAct->blockSignals(true);
+            m_recordAct->setChecked(false);
+            m_recordAct->blockSignals(false);
+            return;
+        }
+        m_recordFile = new QFile(path);
+        if (!m_recordFile->open(QIODevice::WriteOnly | QIODevice::Truncate
+                                | QIODevice::Text)){
+            const QString err = m_recordFile->errorString();
+            delete m_recordFile;  m_recordFile = nullptr;
+            m_log->appendError(tr("record: open failed (%1): %2").arg(path).arg(err));
+            m_recordAct->blockSignals(true);
+            m_recordAct->setChecked(false);
+            m_recordAct->blockSignals(false);
+            return;
+        }
+        m_recordStream = new QTextStream(m_recordFile);
+        m_recordRowCount      = 0;
+        m_recordHeaderWritten = false;
+        m_log->appendInfo(tr("recording started → %1").arg(path));
     } else {
-        m_log->appendInfo(tr("recording OFF"));
+        if (m_recordStream){ m_recordStream->flush(); }
+        if (m_recordFile){
+            m_recordFile->close();
+            m_log->appendInfo(tr("recording stopped (%1 rows written → %2)")
+                                  .arg(m_recordRowCount)
+                                  .arg(m_recordFile->fileName()));
+        }
+        delete m_recordStream;  m_recordStream = nullptr;
+        delete m_recordFile;    m_recordFile   = nullptr;
     }
-    /* TODO: append snapshots to a CSV file while recording. */
+}
+
+void MainWindow::recordSnapshots(const QVector<vrmc::SlaveSnapshot>& snaps)
+{
+    if (!m_recordStream){ return; }
+    if (!m_recordHeaderWritten){
+        /* One header line for all slaves. ts_ms is the wallclock when
+         * the snapshot batch landed in MainWindow; per-slave columns
+         * follow. */
+        *m_recordStream << "ts_ms,slave_idx,slave_id,name,state,statusword,"
+                           "error_code,pos_rad,vel_rad_s,torque_nm,"
+                           "current_A,temperature_C,tracking_error\n";
+        m_recordHeaderWritten = true;
+    }
+    const qint64 ts = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& s : snaps){
+        *m_recordStream << ts << ','
+                        << s.idx << ',' << s.id << ','
+                        << '"' << s.name << '"' << ','
+                        << s.state << ','
+                        << s.statusword << ','
+                        << s.errorCode << ','
+                        << s.position << ','
+                        << s.velocity << ','
+                        << s.torque << ','
+                        << s.current << ','
+                        << s.temperature << ','
+                        << s.trackingError << '\n';
+        ++m_recordRowCount;
+    }
 }
 
 void MainWindow::onExportTelemetry()
@@ -862,6 +1145,137 @@ void MainWindow::onClearCharts()
  *  Help menu
  * ==================================================================== */
 
+QString MainWindow::findSimBinary() const
+{
+    /* Prefer the diagnostic's own in-tree simulator (`vrmc_sim`) — it
+     * lives next to the diagnostic binary in the same CMake build
+     * tree, so the demo doesn't depend on the SDK's compiled
+     * `cia402_drive_sim`. The SDK binary is still accepted as a fall-
+     * back so existing development checkouts keep working. */
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        /* in-tree sim, sibling to the diagnostic binary */
+        appDir + "/vrmc_sim",
+        appDir + "/tools/vrmc_sim",
+        /* legacy: SDK's compiled sim */
+        appDir + "/../../vr-mc-sdk/build/app/cia402_drive_sim",
+        appDir + "/../vr-mc-sdk/build/app/cia402_drive_sim",
+        appDir + "/cia402_drive_sim",
+    };
+    for (const QString& c : candidates){
+        const QFileInfo fi(QDir::cleanPath(c));
+        if (fi.exists() && fi.isExecutable()){
+            return fi.canonicalFilePath();
+        }
+    }
+    /* Last resort: PATH lookup. Try our own name first, then the
+     * SDK's. */
+    for (const QString& name : { QStringLiteral("vrmc_sim"),
+                                 QStringLiteral("cia402_drive_sim") }){
+        const QString fromPath = QStandardPaths::findExecutable(name);
+        if (!fromPath.isEmpty()){ return fromPath; }
+    }
+    return QString();
+}
+
+void MainWindow::onStartDemo()
+{
+    if (!m_demoProcs.isEmpty()){
+        QMessageBox::information(this, tr("Demo"),
+            tr("A demo is already running. Stop it first via Help → "
+               "Stop demo."));
+        return;
+    }
+    const QString binary = findSimBinary();
+    if (binary.isEmpty()){
+        QMessageBox::warning(this, tr("Demo"),
+            tr("vrmc_sim not found.\n\n"
+               "The simulator is built as part of the diagnostic — "
+               "rebuild with `cmake --build vr-mc-diagnostic/build` "
+               "and try again."));
+        return;
+    }
+
+    bool ok = false;
+    const int count = QInputDialog::getInt(
+        this, tr("Start demo"),
+        tr("How many simulated slaves? Each runs as a separate "
+           "cia402_drive_sim process on UDP multicast "
+           "239.192.0.42:23400 with sequential node IDs starting "
+           "at 5."),
+        /*default*/ 3,
+        /*min*/     1,
+        /*max*/     32,
+        /*step*/    1,
+        &ok);
+    if (!ok){ return; }
+
+    /* Spawn one process per slave. Each gets its own --node id so
+     * their statusword/PDO traffic doesn't collide on the bus. */
+    constexpr int kFirstId = 5;
+    for (int i = 0; i < count; ++i){
+        auto* p = new QProcess(this);
+        p->setProgram(binary);
+        p->setArguments({QStringLiteral("--udp"),
+                         QStringLiteral("--node"),
+                         QString::number(kFirstId + i)});
+        /* Tee stderr/stdout straight to the parent so failures land in
+         * the calling terminal; the diagnostic's LogDock would be more
+         * polished but stderr is cheap and good enough for a demo. */
+        p->setProcessChannelMode(QProcess::ForwardedChannels);
+        p->start();
+        if (!p->waitForStarted(1500)){
+            const QString err = p->errorString();
+            /* Tear down everything we did spawn and abort. */
+            for (auto* q : m_demoProcs){ q->kill(); q->deleteLater(); }
+            m_demoProcs.clear();
+            p->deleteLater();
+            QMessageBox::warning(this, tr("Demo"),
+                tr("Failed to start cia402_drive_sim for node %1: %2")
+                    .arg(kFirstId + i).arg(err));
+            return;
+        }
+        m_demoProcs.push_back(p);
+        m_log->appendInfo(tr("demo: spawned cia402_drive_sim --node %1 (pid %2)")
+                              .arg(kFirstId + i).arg(p->processId()));
+    }
+
+    m_demoStartAct->setEnabled(false);
+    m_demoStopAct ->setEnabled(true);
+
+    /* Give the sims a moment to bind their UDP sockets + start
+     * emitting the heartbeat TPDO, then auto-connect. The probe in
+     * CanBackend::open waits up to 250 ms for that first heartbeat
+     * — bake in a little extra here so the connect doesn't false-
+     * negative on slower machines. */
+    QTimer::singleShot(400, this, [this, count]{
+        CanConfig cfg;
+        cfg.kind     = CanKind::Udp;
+        cfg.count    = static_cast<uint8_t>(count);
+        cfg.first_id = 5;
+        connectWithConfig(cfg);
+    });
+}
+
+void MainWindow::onStopDemo()
+{
+    if (m_demoProcs.isEmpty()){ return; }
+    /* Drop the bus first so the diagnostic doesn't yell about
+     * disappearing telemetry while the sims tear down. */
+    QMetaObject::invokeMethod(m_worker, "disconnect_", Qt::QueuedConnection);
+    for (auto* p : m_demoProcs){
+        if (p->state() != QProcess::NotRunning){
+            p->terminate();
+            if (!p->waitForFinished(500)){ p->kill(); p->waitForFinished(200); }
+        }
+        p->deleteLater();
+    }
+    m_log->appendInfo(tr("demo: stopped %1 sim process(es)").arg(m_demoProcs.size()));
+    m_demoProcs.clear();
+    m_demoStartAct->setEnabled(true);
+    m_demoStopAct ->setEnabled(false);
+}
+
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, tr("About VR Motor Control Diagnostic Tool"),
@@ -877,11 +1291,44 @@ void MainWindow::onAbout()
 
 void MainWindow::onDocumentation()
 {
-    const QString readme = QStringLiteral(
-        "%1/../README.md").arg(QCoreApplication::applicationDirPath());
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(readme))){
-        m_log->appendInfo(tr("documentation: %1 (open manually)").arg(readme));
+    /* Search a few well-known locations because the binary can live in
+     * several layouts:
+     *   - source tree   : build/vr_mc_diagnostic  →  ../docs/, ../README.md
+     *   - AppImage      : usr/bin/vr_mc_diagnostic →  ../share/vr_mc_diagnostic/docs/
+     *   - system install: /usr/bin/vr_mc_diagnostic → same as AppImage
+     * Prefer rendered HTML over the raw markdown so the browser-side
+     * formatting is preserved; fall back to README.md at the repo
+     * root for dev builds where docs haven't been rendered yet. */
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        appDir + "/../share/vr_mc_diagnostic/docs/user_guide.html",
+        appDir + "/../share/vr_mc_diagnostic/docs/user_guide.pdf",
+        appDir + "/../share/vr_mc_diagnostic/docs/user_guide.md",
+        appDir + "/../docs/user_guide.html",
+        appDir + "/../docs/user_guide.pdf",
+        appDir + "/../docs/user_guide.md",
+        appDir + "/../README.md",
+    };
+    QStringList tried;
+    for (const QString& c : candidates){
+        const QString clean = QDir::cleanPath(c);
+        tried << clean;
+        if (QFile::exists(clean)){
+            const QUrl url = QUrl::fromLocalFile(clean);
+            if (QDesktopServices::openUrl(url)){
+                m_log->appendInfo(tr("documentation: opened %1").arg(clean));
+            } else {
+                /* xdg-open / system handler refused — copy the path
+                 * to the clipboard so the operator can paste it. */
+                QApplication::clipboard()->setText(clean);
+                m_log->appendInfo(tr("documentation: %1 (clipboard — "
+                                     "open it manually)").arg(clean));
+            }
+            return;
+        }
     }
+    m_log->appendError(tr("documentation: not found. Tried:\n  %1")
+                           .arg(tried.join(QStringLiteral("\n  "))));
 }
 
 }  // namespace vrmc

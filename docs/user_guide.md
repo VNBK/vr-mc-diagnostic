@@ -1,79 +1,85 @@
-# VR Motor Control Diagnostic Tool — User Guide
-
-**Version**: 1.0 · **Audience**: commissioning engineers, firmware developers
+<div class="doc-header">
+  <img src="images/vinrobotic.png" alt="VinRobotics" class="doc-logo"/>
+  <h1>VR Motor Control Diagnostic Tool — User Guide</h1>
+  <p class="doc-meta"><strong>Version 1.0</strong> · <em>Audience:</em> commissioning engineers, firmware developers</p>
+</div>
 
 ---
 
 ## Contents
 
-1. Overview & architecture
-2. Install & first run
-3. Connecting to drives
-4. Main window tour
-5. Left-tab panels (Control · Gains · Signal generator)
-6. Detachable panes (Profile · Tuning · PDO map)
-7. Configure Drive dialog
-8. Commissioning workflow
-9. Tuning workflows
-10. PDO mapping — read, edit, apply
-11. Telemetry recording & export
-12. Emergency stop
-13. Keyboard shortcuts
-14. Troubleshooting
-15. Appendix A — Transports
-16. Appendix B — CiA 402 OD reference
-17. Appendix C — Command-line flags
+1. First run with Demo
+2. Connecting to drives
+3. Main window tour
+4. Left-tab panels (Control · Gains · Signal generator)
+5. Detachable panes (Profile · Tuning · PDO map)
+6. Configure Drive dialog
+7. Commissioning workflow
+8. Tuning workflows
+9. PDO mapping — read, edit, apply
+10. Telemetry recording & export
+11. Emergency stop
+12. Keyboard shortcuts
+13. Troubleshooting
+14. Appendix A — Transports
+15. Appendix B — CiA 402 OD reference
+16. Appendix C — Command-line flags
 
 ---
 
-## 1. Overview & architecture
+## 1. First run with Demo
 
-Standalone Qt 6 desktop app that reads and writes CiA 402 motor drives
-over a `hal_can` transport. UI thread + dedicated `MasterWorker`
-`QThread` owning the SDK stack; queued signals/slots cross the
-boundary.
+The fastest way to verify the install is to use the bundled simulator
+— no real hardware, no extra terminals. Launch the diagnostic, then:
 
-![Architecture](images/architecture.svg)
+1. **Help → Start demo…**
+2. Pick a slave count (default 3, range 1–32).
+3. The diagnostic spawns that many `vrmc_sim` processes on UDP
+   multicast `239.192.0.42:23400` with sequential node IDs (5, 6,
+   7, …) and **auto-connects**.
+4. The slave list populates, MotorView lights up for the first
+   slave, and the telemetry pane starts plotting position /
+   velocity / torque.
 
-Layering:
+The simulator runs entirely inside the diagnostic's own build tree
+(`vrmc_sim` next to `vr_mc_diagnostic`), so this workflow works
+straight out of the box — no need to compile or run anything from
+`vr-mc-sdk` separately.
 
-- **UI thread** — widgets, input routing, QtCharts. Never blocks on SDO.
-- **Worker thread** — owns `master_mgr_t`, runs periodic refresh, all SDO R/W. Emits snapshot signal at 100 Hz.
-- **SDK layer** — `master_mgr` → per-slave `motor_drive_interface` → `cia402_master` → `co_fd_usdo` / `can_fd_pdo` → `hal_can`.
-- **Transport** — `hal_can_udp` (loopback) or `hal_can_zlg` (USB-CANFD).
+To stop:
+
+- **Help → Stop demo** — terminates the sim processes cleanly.
+- Pressing the toolbar **Disconnect** also stops the demo (Help
+  menu state flips back to "Start demo" enabled).
+- Closing the diagnostic kills any surviving sim child processes
+  so nothing is left listening on the multicast group.
+
+### Trying the Control tab against the demo
+
+Once auto-connect lands, the first slave is selected and you can
+drive it straight away:
+
+1. Click **Bringup** in the Control tab — the state readout strip
+   walks `SWITCH_ON_DISABLED → READY_TO_SWITCH_ON → SWITCHED_ON →
+   OPERATION_ENABLED` (badge turns green).
+2. Type a value into the Setpoint spinbox (default unit = rad in
+   Position mode) and click **Send** — the MotorView needle swings
+   to the new angle. Try the preset buttons `+π/4` / `−π/4` /
+   `Home` for one-click setpoints.
+3. Tick `[deg]` in the readout strip to switch the spinbox + slider
+   + tracking-error display to degrees.
+4. Move the slider with **stream live** checked to scrub the
+   setpoint in real time.
+5. **E-STOP** (toolbar, far right) — instantly disarms every slave
+   and pops the panel buttons back to disabled.
+
+If anything in this sequence fails, look at the Log dock at the
+bottom: every SDO error, PDO online event, and demo-process
+lifecycle line lands there with a timestamp.
 
 ---
 
-## 2. Install & first run
-
-### Prerequisites
-- Qt 6.2+ (Core, Gui, Widgets, Charts)
-- CMake 3.16+, C++17 compiler
-- Linux host (BSD sockets for UDP, `dlopen()` for ZLG)
-- USB-CANFD adapter for ZLG path
-
-### Build
-
-```bash
-cd vr-mc-diagnostic
-cmake -S . -B build
-cmake --build build --target vr_mc_diagnostic -j
-./build/vr_mc_diagnostic
-```
-
-### Loopback bring-up
-
-```bash
-./vr-mc-sdk/build/app/motor_drive_cia402 --udp --node 5   # one terminal
-./vr-mc-diagnostic/build/vr_mc_diagnostic --auto-connect  # another
-```
-
-Simulator emits TPDO1 @ 2 kHz on `239.192.0.42:23400`; `--auto-connect`
-wires node 5.
-
----
-
-## 3. Connecting to drives
+## 2. Connecting to drives
 
 **Connection → Connect…** (`Ctrl+K`).
 
@@ -90,7 +96,7 @@ idempotent — worker thread survives for the next connect.
 
 ---
 
-## 4. Main window tour
+## 3. Main window tour
 
 ![Annotated layout](images/window_layout.svg)
 
@@ -104,7 +110,7 @@ panel.
 
 ---
 
-## 5. Left-tab panels
+## 4. Left-tab panels
 
 ### Control
 
@@ -135,7 +141,7 @@ sweep.
 
 ---
 
-## 6. Detachable panes
+## 5. Detachable panes
 
 Created hidden + floating. Toolbar View group brings them out.
 
@@ -163,7 +169,7 @@ value. **Edit…** runs the CiA 301 §7.2.2.2 remap dance via SDO.
 
 ---
 
-## 7. Configure Drive
+## 6. Configure Drive
 
 **Drive → Configure Drive…** (`Ctrl+Shift+C`).
 
@@ -172,7 +178,7 @@ value. **Edit…** runs the CiA 301 §7.2.2.2 remap dance via SDO.
 Modeless tabbed dialog. Opens with the selected slave, kicks off a
 batch SDO read so the form reflects the drive.
 
-### 7.1 Homing
+### 6.1 Homing
 
 | Field | OD |
 |-------|-----|
@@ -188,18 +194,18 @@ batch SDO read so the form reflects the drive.
 
 **Zero encoder here** — reads `0x6064`, writes `0x607C`, updates form.
 
-### 7.2 Motion profile
+### 6.2 Motion profile
 
 Profile velocity `0x6081`, accel `0x6083`, decel `0x6084`, quickstop
 decel `0x6085`.
 
-### 7.3 Protection
+### 6.3 Protection
 
 Following error `0x6065` + timeout `0x6066`, pos limits `0x607D:1,2`,
 max speed `0x6080`, max torque `0x6072`. **Zero torque here** reads
 `0x6077`, writes `0x60B2`.
 
-### 7.4 Encoder
+### 6.4 Encoder
 
 Resolution `0x608F:1`, gear ratio `0x6091:1,2`, feed constant
 `0x6092:1,2`.
@@ -212,7 +218,7 @@ Resolution `0x608F:1`, gear ratio `0x6091:1,2`, feed constant
 
 ---
 
-## 8. Commissioning workflow
+## 7. Commissioning workflow
 
 ![Commissioning flow](images/commissioning_flow.svg)
 
@@ -229,7 +235,7 @@ Resolution `0x608F:1`, gear ratio `0x6091:1,2`, feed constant
 
 ---
 
-## 9. Tuning workflows
+## 8. Tuning workflows
 
 ### Step response
 
@@ -246,7 +252,7 @@ Resolution `0x608F:1`, gear ratio `0x6091:1,2`, feed constant
 
 ---
 
-## 10. PDO mapping — read, edit, apply
+## 9. PDO mapping — read, edit, apply
 
 ![Transport paths](images/transport_paths.svg)
 
@@ -264,7 +270,7 @@ completes and the TPDO layout changes take effect on next emission.
 
 ---
 
-## 11. Telemetry recording & export
+## 10. Telemetry recording & export
 
 - **Record telemetry** (`Ctrl+Shift+R`) — toggle; currently a placeholder (CSV-per-snapshot planned).
 - **Export telemetry CSV…** — dumps buffered chart data.
@@ -272,7 +278,7 @@ completes and the TPDO layout changes take effect on next emission.
 
 ---
 
-## 12. Emergency stop
+## 11. Emergency stop
 
 Red button, toolbar right edge. `Space` app-wide. On click: stop
 generator → `master_mgr_disable_all` → every slave → Switch On
@@ -280,7 +286,7 @@ Disabled. Re-enable via normal Control tab Bringup + Enable.
 
 ---
 
-## 13. Keyboard shortcuts
+## 12. Keyboard shortcuts
 
 | Combo | Action |
 |-------|--------|
@@ -295,7 +301,7 @@ Disabled. Re-enable via normal Control tab Bringup + Enable.
 
 ---
 
-## 14. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause | Check |
 |---------|-------|-------|

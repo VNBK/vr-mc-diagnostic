@@ -115,10 +115,50 @@ public:
     bool getPdo(uint32_t idx, PdoFrame* out) const;
 
     /** @return true when the PDO layer is wired up for the current
-     *  transport (UDP). Worker uses this to decide whether telemetry
-     *  should come from cached TPDO frames (fast, passive) or from
-     *  per-tick SDO reads (slow, blast-y). */
+     *  transport (UDP / ZLG). Worker uses this to decide whether
+     *  telemetry should come from cached TPDO frames (fast, passive)
+     *  or from per-tick SDO reads (slow, blast-y). */
     bool hasPdo() const { return m_pdo != nullptr; }
+
+    /** @brief Send one outgoing RPDO frame to a slave.
+     *
+     *  Builds the 12-byte payload `[controlword | target_pos |
+     *  target_vel | target_torque]` (little-endian), then
+     *  @c can_fd_tpdo_write + @c can_fd_tpdo_trigger. Mirrors
+     *  @c cia402_pdo_send in vr-mc-sdk/app/motor_drive_master.c.
+     *
+     *  @return 0 on success; -1 if the slot is invalid or PDO is
+     *          unavailable (UART transports); transport-level error
+     *          codes pass through from @c can_fd_tpdo_*. */
+    int pdoSend(uint32_t idx, uint16_t controlword,
+                int32_t target_pos, int32_t target_vel,
+                int16_t target_torque);
+
+    /** @brief Arm the per-tick PDO keep-alive for a slot.
+     *
+     *  Sets the cached controlword (typically @c 0x000F = Enable
+     *  Operation after a successful bring-up) and flips @c tx_active.
+     *  MasterWorker::onTick then streams the cached cw + targets at
+     *  the worker poll rate so the sim's RPDO-event adoption path
+     *  keeps firing. */
+    void armPdoTx(uint32_t idx, uint16_t controlword);
+
+    /** @brief Disarm the per-tick PDO keep-alive (e.g. on disable /
+     *  quick-stop / disconnect). Subsequent ticks skip this slot. */
+    void disarmPdoTx(uint32_t idx);
+
+    /** @brief Update a slot's cached PDO targets. Safe to call from
+     *  any thread; values are read by the next keep-alive tick. */
+    void setTarget(uint32_t idx, int32_t pos, int32_t vel, int16_t torque);
+
+    /** @brief Stream one keep-alive RPDO for each armed slot. Called
+     *  by MasterWorker each tick. No-op for slots with @c tx_active
+     *  false (bring-up not done, or disarmed). */
+    void pdoTick();
+
+    /** Number of slaves currently registered (for MasterWorker
+     *  iteration). */
+    uint32_t slaveCount() const { return static_cast<uint32_t>(m_slots.size()); }
 
     /** One OD entry slot in a PDO mapping (CiA 301 §7.2.2.2). */
     struct PdoMapEntry {

@@ -2,7 +2,9 @@
 
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -64,7 +66,10 @@ static const HomingMethod kHomingMethods[] = {
 DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
 {
     setWindowTitle(tr("Configure drive"));
-    resize(520, 520);
+    /* Don't hard-code a size — the dialog now hosts 6 tabs and the
+     * Manufacturer tab in particular needs more room than the original
+     * 520×520. adjustSize() (called at end of constructor + on every
+     * show via showEvent) lets the layout compute its natural footprint. */
 
     m_header = new QLabel(tr("No slave selected."), this);
     m_header->setStyleSheet(QStringLiteral("font-weight: 600;"));
@@ -74,14 +79,20 @@ DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
     auto* tMotion  = new QWidget;
     auto* tProtect = new QWidget;
     auto* tEncoder = new QWidget;
-    buildHomingTab (tHoming);
-    buildMotionTab (tMotion);
-    buildProtectTab(tProtect);
-    buildEncoderTab(tEncoder);
+    auto* tManuf   = new QWidget;
+    auto* tCustom  = new QWidget;
+    buildHomingTab      (tHoming);
+    buildMotionTab      (tMotion);
+    buildProtectTab     (tProtect);
+    buildEncoderTab     (tEncoder);
+    buildManufacturerTab(tManuf);
+    buildCustomTab      (tCustom);
     tabs->addTab(tHoming,  tr("Homing"));
     tabs->addTab(tMotion,  tr("Motion profile"));
     tabs->addTab(tProtect, tr("Protection"));
     tabs->addTab(tEncoder, tr("Encoder"));
+    tabs->addTab(tManuf,   tr("Manufacturer"));
+    tabs->addTab(tCustom,  tr("Custom SDO"));
 
     m_readBtn  = new QPushButton(tr("Read from drive"), this);
     m_applyBtn = new QPushButton(tr("Apply"), this);
@@ -110,6 +121,21 @@ DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
     root->addWidget(m_buttons);
 
     setConfig(DriveConfig{});
+    /* Ask the layout for its natural footprint so all tabs (and the
+     * widest one, "Fault thresholds", in particular) are fully visible
+     * the moment the dialog is shown. Without this the dialog comes up
+     * at QDialog's default tiny size and the operator has to drag a
+     * corner before they can see the spinboxes. */
+    adjustSize();
+}
+
+void DriveConfigDialog::showEvent(QShowEvent* e)
+{
+    QDialog::showEvent(e);
+    /* Re-fit on every show in case the tab contents were modified
+     * between opens (e.g. the operator typed a long value into the
+     * Custom-SDO result label which then asked for more width). */
+    adjustSize();
 }
 
 void DriveConfigDialog::buildHomingTab(QWidget* host)
@@ -197,6 +223,16 @@ void DriveConfigDialog::buildProtectTab(QWidget* host)
                                 std::numeric_limits<int>::max(),    tr("counts"));
     m_maxSpeed       = makeSpin(0, 1'000'000, 10000, tr("cnt/s"));
     m_maxTorque      = makeSpin(0, 10000,     2000, tr("‰ rated"));
+    m_ratedTorque    = makeSpin(0, std::numeric_limits<int>::max(),
+                                0, tr("mNm"));
+    /* Current actual is read-only (0x6078). Drive populates on Read;
+     * write pass skips it. Rendered as a label, not a spinbox, so the
+     * operator can't accidentally type into it. */
+    m_currentActual  = new QLabel(QStringLiteral("—"), host);
+    m_currentActual->setStyleSheet(QStringLiteral(
+        "QLabel { font-family: monospace; padding: 2px 8px; "
+        "         border: 1px solid #555; border-radius: 3px; "
+        "         background: #1a1a1a; color: #cfd8e3; }"));
 
     form->addRow(tr("Max following error (0x6065)"), m_followingError);
     form->addRow(tr("Following error time (0x6066)"), m_followingMs);
@@ -204,6 +240,8 @@ void DriveConfigDialog::buildProtectTab(QWidget* host)
     form->addRow(tr("Pos limit max (0x607D:2)"),      m_posMax);
     form->addRow(tr("Max motor speed (0x6080)"),      m_maxSpeed);
     form->addRow(tr("Max torque (0x6072)"),           m_maxTorque);
+    form->addRow(tr("Rated torque (0x6076)"),         m_ratedTorque);
+    form->addRow(tr("Current actual (0x6078, RO)"),   m_currentActual);
     root->addWidget(formWrap);
 
     m_zeroTorqueBtn = new QPushButton(tr("Zero torque here"), host);
@@ -239,6 +277,232 @@ void DriveConfigDialog::buildEncoderTab(QWidget* host)
     form->addRow(tr("Gear denominator (0x6091:2)"),    m_gearDen);
     form->addRow(tr("Feed const numerator (0x6092:1)"), m_feedNum);
     form->addRow(tr("Feed const denominator (0x6092:2)"), m_feedDen);
+}
+
+/* ------------------------------------------------------------ Manufacturer
+ *
+ * Vendor-defined OD entries — Node ID, per-loop gains via the manufacturer
+ * range (parallel to the Gains tab which uses motor_drive_intf abstractions),
+ * per-phase current-sensor calibration, and the over-current trip threshold.
+ *
+ * All indices below are placeholders for a typical FOC drive layout. If
+ * your hardware uses different indices, override at the Custom-SDO tab
+ * or edit driveFields() in MasterWorker.cpp. Slaves that don't expose
+ * an index will silently abort the read with 0x06020000 and the
+ * spinbox will remain at 0. */
+void DriveConfigDialog::buildManufacturerTab(QWidget* host)
+{
+    auto* root = new QVBoxLayout(host);
+
+    auto makeDoubleSpin = [host](double lo, double hi, double v, int dec){
+        auto* s = new QDoubleSpinBox(host);
+        s->setRange(lo, hi);
+        s->setDecimals(dec);
+        s->setValue(v);
+        s->setAlignment(Qt::AlignRight);
+        return s;
+    };
+
+    /* --- Node + identity --- */
+    auto* idBox = new QGroupBox(tr("Identity"), host);
+    {
+        auto* form = new QFormLayout(idBox);
+        m_mfNodeId = makeSpin(1, 127, 5);  /* CANopen node IDs are 1..127 */
+        form->addRow(tr("Node ID (0x2000:00)"), m_mfNodeId);
+    }
+    root->addWidget(idBox);
+
+    /* --- Per-loop gains (manufacturer parallel path to Gains tab) --- */
+    auto* gainBox = new QGroupBox(tr("Loop gains (manufacturer)"), host);
+    {
+        auto* form = new QFormLayout(gainBox);
+        m_mfCurKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        m_mfCurKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        m_mfVelKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        m_mfVelKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        m_mfPosKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        m_mfPosKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
+        form->addRow(tr("Current Kp (0x2010)"), m_mfCurKp);
+        form->addRow(tr("Current Ki (0x2011)"), m_mfCurKi);
+        form->addRow(tr("Velocity Kp (0x2020)"), m_mfVelKp);
+        form->addRow(tr("Velocity Ki (0x2021)"), m_mfVelKi);
+        form->addRow(tr("Position Kp (0x2030)"), m_mfPosKp);
+        form->addRow(tr("Position Ki (0x2031)"), m_mfPosKi);
+    }
+    root->addWidget(gainBox);
+
+    /* --- Per-phase current sensor calibration --- */
+    auto* phaseBox = new QGroupBox(tr("Current sensor calibration"), host);
+    {
+        auto* form = new QFormLayout(phaseBox);
+        m_mfCurOffA = makeSpin(-32768, 32767, 0, tr("counts"));
+        m_mfCurOffB = makeSpin(-32768, 32767, 0, tr("counts"));
+        m_mfCurOffC = makeSpin(-32768, 32767, 0, tr("counts"));
+        m_mfCurGainA = makeSpin(0, 65535, 0);
+        m_mfCurGainB = makeSpin(0, 65535, 0);
+        m_mfCurGainC = makeSpin(0, 65535, 0);
+        form->addRow(tr("Current offset A (0x2040:1)"), m_mfCurOffA);
+        form->addRow(tr("Current offset B (0x2040:2)"), m_mfCurOffB);
+        form->addRow(tr("Current offset C (0x2040:3)"), m_mfCurOffC);
+        form->addRow(tr("Current gain A (0x2041:1)"),   m_mfCurGainA);
+        form->addRow(tr("Current gain B (0x2041:2)"),   m_mfCurGainB);
+        form->addRow(tr("Current gain C (0x2041:3)"),   m_mfCurGainC);
+    }
+    root->addWidget(phaseBox);
+
+    /* --- Trip thresholds (10 sub-indices under 0x2050) --- */
+    auto* faultBox = new QGroupBox(tr("Fault thresholds (0x2050)"), host);
+    {
+        auto* form = new QFormLayout(faultBox);
+        const int kMaxU32 = std::numeric_limits<int>::max();
+        m_mfFltOverCur     = makeSpin(0, kMaxU32, 0, tr("mA"));
+        m_mfFltOverLoad    = makeSpin(0, 1000,    0, tr("% rated"));
+        m_mfFltOverLoadMs  = makeSpin(0, kMaxU32, 0, tr("ms"));
+        m_mfFltLossPhase   = makeSpin(0, kMaxU32, 0, tr("mA"));
+        m_mfFltLossPhaseMs = makeSpin(0, kMaxU32, 0, tr("ms"));
+        m_mfFltUnbalance   = makeSpin(0, kMaxU32, 0, tr("mA"));
+        m_mfFltStallMs     = makeSpin(0, kMaxU32, 0, tr("ms"));
+        m_mfFltOverVolt    = makeSpin(0, kMaxU32, 0, tr("mV"));
+        m_mfFltUnderVolt   = makeSpin(0, kMaxU32, 0, tr("mV"));
+        /* Temperature is signed °C × 10 (so -40.0°C = -400). */
+        m_mfFltOverTemp    = makeSpin(-3000, 3000, 0, tr("°C × 10"));
+
+        form->addRow(tr("Over current (:01)"),         m_mfFltOverCur);
+        form->addRow(tr("Over load (:02)"),            m_mfFltOverLoad);
+        form->addRow(tr("Over load time (:03)"),       m_mfFltOverLoadMs);
+        form->addRow(tr("Current loss phase (:04)"),   m_mfFltLossPhase);
+        form->addRow(tr("Current loss phase time (:05)"), m_mfFltLossPhaseMs);
+        form->addRow(tr("Unbalance current (:06)"),    m_mfFltUnbalance);
+        form->addRow(tr("Stall time (:07)"),           m_mfFltStallMs);
+        form->addRow(tr("Over voltage (:08)"),         m_mfFltOverVolt);
+        form->addRow(tr("Under voltage (:09)"),        m_mfFltUnderVolt);
+        form->addRow(tr("Over temperature (:0A)"),     m_mfFltOverTemp);
+    }
+    root->addWidget(faultBox);
+    root->addStretch(1);
+}
+
+/* ---------------------------------------------------------------- Custom SDO
+ *
+ * Free-form OD poke. The operator picks an index, sub-index, datatype,
+ * and a write value, then Reads or Writes via an expedited SDO. Output
+ * pane shows the wire bytes (little-endian hex) on success or the SDO
+ * abort code on failure. Most useful for one-off pokes during
+ * commissioning of a new drive whose vendor-specific OD entries aren't
+ * yet exposed in the dedicated tabs. */
+void DriveConfigDialog::buildCustomTab(QWidget* host)
+{
+    auto* root = new QVBoxLayout(host);
+
+    auto* form = new QFormLayout;
+    m_customIdx = new QSpinBox;
+    m_customIdx->setRange(0, 0xFFFF);
+    m_customIdx->setDisplayIntegerBase(16);
+    m_customIdx->setPrefix(QStringLiteral("0x"));
+    m_customIdx->setValue(0x6040);                  /* default: controlword */
+
+    m_customSub = new QSpinBox;
+    m_customSub->setRange(0, 0xFF);
+    m_customSub->setDisplayIntegerBase(16);
+    m_customSub->setPrefix(QStringLiteral("0x"));
+    m_customSub->setValue(0x00);
+
+    m_customType = new QComboBox;
+    /* (userData = byte length). Signed types just affect display; the
+     * wire is identical to unsigned. */
+    m_customType->addItem(QStringLiteral("uint8  (1)"),  1);
+    m_customType->addItem(QStringLiteral("uint16 (2)"),  2);
+    m_customType->addItem(QStringLiteral("uint32 (4)"),  4);
+    m_customType->addItem(QStringLiteral("int8   (1)"),  1);
+    m_customType->addItem(QStringLiteral("int16  (2)"),  2);
+    m_customType->addItem(QStringLiteral("int32  (4)"),  4);
+    m_customType->setCurrentIndex(1);               /* uint16 by default */
+
+    m_customValue = new QSpinBox;
+    m_customValue->setRange(std::numeric_limits<int>::min(),
+                            std::numeric_limits<int>::max());
+    m_customValue->setValue(0);
+    m_customValue->setToolTip(tr("Write payload (decimal). Encoded as "
+                                 "little-endian according to the chosen "
+                                 "data type."));
+
+    form->addRow(tr("Index"),     m_customIdx);
+    form->addRow(tr("Sub-index"), m_customSub);
+    form->addRow(tr("Data type"), m_customType);
+    form->addRow(tr("Value"),     m_customValue);
+    root->addLayout(form);
+
+    m_customReadBtn  = new QPushButton(tr("Read"),  host);
+    m_customWriteBtn = new QPushButton(tr("Write"), host);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addWidget(m_customReadBtn);
+    btnRow->addWidget(m_customWriteBtn);
+    btnRow->addStretch();
+    root->addLayout(btnRow);
+
+    m_customResult = new QLabel(tr("(no SDO yet)"), host);
+    m_customResult->setWordWrap(true);
+    m_customResult->setStyleSheet(QStringLiteral(
+        "QLabel { font-family: monospace; padding: 6px 8px; "
+        "         border: 1px solid #555; border-radius: 4px; "
+        "         background: #1a1a1a; color: #cfd8e3; }"));
+    root->addWidget(m_customResult);
+    root->addStretch(1);
+
+    connect(m_customReadBtn, &QPushButton::clicked, this, [this]{
+        if (m_slaveIdx < 0){ return; }
+        const int bytes = m_customType->currentData().toInt();
+        emit customSdoReadRequested(m_slaveIdx,
+                                    static_cast<uint16_t>(m_customIdx->value()),
+                                    static_cast<uint8_t>(m_customSub->value()),
+                                    bytes);
+        m_customResult->setText(tr("(reading…)"));
+    });
+    connect(m_customWriteBtn, &QPushButton::clicked, this, [this]{
+        if (m_slaveIdx < 0){ return; }
+        const int bytes = m_customType->currentData().toInt();
+        /* Encode value LE into a QByteArray sized to the datatype. */
+        QByteArray payload(bytes, '\0');
+        const int64_t v = static_cast<int64_t>(m_customValue->value());
+        for (int i = 0; i < bytes; ++i){
+            payload[i] = char((v >> (8 * i)) & 0xFF);
+        }
+        emit customSdoWriteRequested(m_slaveIdx,
+                                     static_cast<uint16_t>(m_customIdx->value()),
+                                     static_cast<uint8_t>(m_customSub->value()),
+                                     payload);
+        m_customResult->setText(tr("(writing %1 bytes…)").arg(bytes));
+    });
+}
+
+void DriveConfigDialog::onCustomSdoDone(int idx, bool isWrite,
+                                        uint16_t odIdx, uint8_t sub,
+                                        bool ok, const QString& valueDecoded,
+                                        const QString& message)
+{
+    /* Result lines are intentionally verbose so the operator can copy
+     * them into a bug report without losing context. */
+    if (idx != m_slaveIdx || !m_customResult){ return; }
+    const QString head = QStringLiteral("0x%1.%2 %3")
+        .arg(odIdx, 4, 16, QChar('0'))
+        .arg(sub,   2, 16, QChar('0'))
+        .arg(isWrite ? QStringLiteral("WRITE") : QStringLiteral("READ"));
+    if (ok){
+        const QString body = isWrite
+            ? tr("OK")
+            : tr("OK  →  %1").arg(valueDecoded);
+        m_customResult->setStyleSheet(QStringLiteral(
+            "QLabel { font-family: monospace; padding: 6px 8px; "
+            "         border: 1px solid #3c6e3c; border-radius: 4px; "
+            "         background: #14301a; color: #aed8ae; }"));
+        m_customResult->setText(QStringLiteral("%1: %2").arg(head, body));
+    } else {
+        m_customResult->setStyleSheet(QStringLiteral(
+            "QLabel { font-family: monospace; padding: 6px 8px; "
+            "         border: 1px solid #8a1a1a; border-radius: 4px; "
+            "         background: #2a1010; color: #ff9090; }"));
+        m_customResult->setText(QStringLiteral("%1 FAILED: %2").arg(head, message));
+    }
 }
 
 void DriveConfigDialog::setSlaveContext(int idx, const QString& name)
@@ -280,12 +544,46 @@ void DriveConfigDialog::setConfig(const DriveConfig& cfg)
     m_posMax         ->setValue(int(cfg.pos_limit_max));
     m_maxSpeed       ->setValue(int(cfg.max_motor_speed));
     m_maxTorque      ->setValue(int(cfg.max_torque));
+    m_ratedTorque    ->setValue(int(cfg.rated_torque));
+    /* Render current_actual as `±N ‰  (±N.NNN A)` when rated torque is
+     * also known — otherwise just the raw per-mille reading. */
+    if (m_currentActual){
+        const int per_mille = cfg.current_actual;
+        m_currentActual->setText(QStringLiteral("%1%2 ‰")
+            .arg(per_mille >= 0 ? QStringLiteral("+") : QString())
+            .arg(per_mille));
+    }
 
     m_encRes         ->setValue(int(cfg.enc_resolution));
     m_gearNum        ->setValue(int(cfg.gear_num));
     m_gearDen        ->setValue(int(cfg.gear_den));
     m_feedNum        ->setValue(int(cfg.feed_const_num));
     m_feedDen        ->setValue(int(cfg.feed_const_den));
+
+    /* Manufacturer-range fields. */
+    if (m_mfNodeId)     m_mfNodeId    ->setValue(int(cfg.node_id));
+    if (m_mfCurKp)      m_mfCurKp     ->setValue(cfg.manuf_cur_kp);
+    if (m_mfCurKi)      m_mfCurKi     ->setValue(cfg.manuf_cur_ki);
+    if (m_mfVelKp)      m_mfVelKp     ->setValue(cfg.manuf_vel_kp);
+    if (m_mfVelKi)      m_mfVelKi     ->setValue(cfg.manuf_vel_ki);
+    if (m_mfPosKp)      m_mfPosKp     ->setValue(cfg.manuf_pos_kp);
+    if (m_mfPosKi)      m_mfPosKi     ->setValue(cfg.manuf_pos_ki);
+    if (m_mfCurOffA)    m_mfCurOffA   ->setValue(int(cfg.current_offset_a));
+    if (m_mfCurOffB)    m_mfCurOffB   ->setValue(int(cfg.current_offset_b));
+    if (m_mfCurOffC)    m_mfCurOffC   ->setValue(int(cfg.current_offset_c));
+    if (m_mfCurGainA)   m_mfCurGainA  ->setValue(int(cfg.current_gain_a));
+    if (m_mfCurGainB)   m_mfCurGainB  ->setValue(int(cfg.current_gain_b));
+    if (m_mfCurGainC)   m_mfCurGainC  ->setValue(int(cfg.current_gain_c));
+    if (m_mfFltOverCur)     m_mfFltOverCur    ->setValue(int(cfg.over_current));
+    if (m_mfFltOverLoad)    m_mfFltOverLoad   ->setValue(int(cfg.over_load));
+    if (m_mfFltOverLoadMs)  m_mfFltOverLoadMs ->setValue(int(cfg.over_load_ms));
+    if (m_mfFltLossPhase)   m_mfFltLossPhase  ->setValue(int(cfg.current_loss_phase));
+    if (m_mfFltLossPhaseMs) m_mfFltLossPhaseMs->setValue(int(cfg.current_loss_phase_ms));
+    if (m_mfFltUnbalance)   m_mfFltUnbalance  ->setValue(int(cfg.unbalance_current));
+    if (m_mfFltStallMs)     m_mfFltStallMs    ->setValue(int(cfg.stall_ms));
+    if (m_mfFltOverVolt)    m_mfFltOverVolt   ->setValue(int(cfg.over_voltage));
+    if (m_mfFltUnderVolt)   m_mfFltUnderVolt  ->setValue(int(cfg.under_voltage));
+    if (m_mfFltOverTemp)    m_mfFltOverTemp   ->setValue(int(cfg.over_temperature));
 }
 
 DriveConfig DriveConfigDialog::config() const
@@ -308,12 +606,40 @@ DriveConfig DriveConfigDialog::config() const
     c.pos_limit_max      = int32_t(m_posMax->value());
     c.max_motor_speed    = uint32_t(m_maxSpeed->value());
     c.max_torque         = uint16_t(m_maxTorque->value());
+    c.rated_torque       = uint32_t(m_ratedTorque->value());
+    /* current_actual is RO; preserve a 0 so write path skips it. */
+    c.current_actual     = 0;
 
     c.enc_resolution     = uint32_t(m_encRes->value());
     c.gear_num           = uint32_t(m_gearNum->value());
     c.gear_den           = uint32_t(m_gearDen->value());
     c.feed_const_num     = uint32_t(m_feedNum->value());
     c.feed_const_den     = uint32_t(m_feedDen->value());
+
+    /* Manufacturer-range fields (0x20xx). */
+    if (m_mfNodeId)     c.node_id          = uint8_t (m_mfNodeId->value());
+    if (m_mfCurKp)      c.manuf_cur_kp     = float   (m_mfCurKp->value());
+    if (m_mfCurKi)      c.manuf_cur_ki     = float   (m_mfCurKi->value());
+    if (m_mfVelKp)      c.manuf_vel_kp     = float   (m_mfVelKp->value());
+    if (m_mfVelKi)      c.manuf_vel_ki     = float   (m_mfVelKi->value());
+    if (m_mfPosKp)      c.manuf_pos_kp     = float   (m_mfPosKp->value());
+    if (m_mfPosKi)      c.manuf_pos_ki     = float   (m_mfPosKi->value());
+    if (m_mfCurOffA)    c.current_offset_a = int16_t (m_mfCurOffA->value());
+    if (m_mfCurOffB)    c.current_offset_b = int16_t (m_mfCurOffB->value());
+    if (m_mfCurOffC)    c.current_offset_c = int16_t (m_mfCurOffC->value());
+    if (m_mfCurGainA)   c.current_gain_a   = uint16_t(m_mfCurGainA->value());
+    if (m_mfCurGainB)   c.current_gain_b   = uint16_t(m_mfCurGainB->value());
+    if (m_mfCurGainC)   c.current_gain_c   = uint16_t(m_mfCurGainC->value());
+    if (m_mfFltOverCur)     c.over_current           = uint32_t(m_mfFltOverCur->value());
+    if (m_mfFltOverLoad)    c.over_load              = uint16_t(m_mfFltOverLoad->value());
+    if (m_mfFltOverLoadMs)  c.over_load_ms           = uint32_t(m_mfFltOverLoadMs->value());
+    if (m_mfFltLossPhase)   c.current_loss_phase     = uint32_t(m_mfFltLossPhase->value());
+    if (m_mfFltLossPhaseMs) c.current_loss_phase_ms  = uint32_t(m_mfFltLossPhaseMs->value());
+    if (m_mfFltUnbalance)   c.unbalance_current      = uint32_t(m_mfFltUnbalance->value());
+    if (m_mfFltStallMs)     c.stall_ms               = uint32_t(m_mfFltStallMs->value());
+    if (m_mfFltOverVolt)    c.over_voltage           = uint32_t(m_mfFltOverVolt->value());
+    if (m_mfFltUnderVolt)   c.under_voltage          = uint32_t(m_mfFltUnderVolt->value());
+    if (m_mfFltOverTemp)    c.over_temperature       = int16_t (m_mfFltOverTemp->value());
     return c;
 }
 

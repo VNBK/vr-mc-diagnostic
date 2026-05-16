@@ -4,6 +4,7 @@
 #include <QMutexLocker>
 #include <QSet>
 #include <QTimer>
+#include <algorithm>
 #include <cmath>
 
 extern "C" {
@@ -142,11 +143,21 @@ void MasterWorker::onTick()
 
     m_can.pump();
 
+    /* Stream a keep-alive RPDO for every slave whose bring-up has
+     * completed (CanBackend::armPdoTx flipped tx_active). The sim
+     * adopts OD targets into vmotor only when an RPDO arrives AND its
+     * state is OPERATION_ENABLED — so without this loop the vmotor
+     * stays at zero forever even after the slider sends a setpoint via
+     * SDO. Slots whose bring-up is in progress or has been disarmed
+     * are silently skipped, so we don't race the cia402_master state
+     * machine. Mirrors motor_drive_master.c's cycle_step + cia402_pdo_send. */
+    m_can.pdoTick();
+
     /* SDO refresh strategy: if PDO is alive, skip the per-tick SDO poll
      * entirely — telemetry comes from cached TPDO frames. Fire a
      * housekeeping refresh every second so name / id / fallback state
      * stay current for slaves that briefly drop PDO. Without PDO
-     * (Feetech, Dynamixel, ZLG today) keep the original per-tick refresh. */
+     * (Feetech, Dynamixel) keep the original per-tick refresh. */
     const bool pdo = m_can.hasPdo();
     ++m_refreshTick;
     const int houseKeepEvery = std::max(1, m_hz);  /* 1 Hz */
@@ -240,14 +251,30 @@ void MasterWorker::onTick()
 
 void MasterWorker::refreshOnce() { onTick(); }
 
+/* CiA-402 controlword bit patterns. See @ref cia402_state_machine in
+ * vr-mc-sdk/src/comm/cia402/cia402_master.h for the full state table. */
+static constexpr uint16_t kCwEnableOperation  = 0x000F;   /* Switch On + Enable Voltage + Quick Stop + Enable Op */
+static constexpr uint16_t kCwShutdown         = 0x0006;   /* Disable on next walk     */
+static constexpr uint16_t kCwQuickStop        = 0x0002;   /* Controlled decel + brake */
+static constexpr uint16_t kCwFaultReset       = 0x0080;   /* Rising edge of bit 7     */
+
 void MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
 {
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ return; }
     if (master_mgr_bringup_one(m_mgr, idx, timeoutMs) != 0){
         emit error(QStringLiteral("bringup slave %1 failed").arg(idx));
+        m_can.disarmPdoTx(static_cast<uint32_t>(idx));
+        emit controlwordCached(idx, 0);
     } else {
         emit info(QStringLiteral("bringup slave %1 ok").arg(idx));
+        /* Slave is in OPERATION_ENABLED; start streaming controlword
+         * 0x0F + current targets every tick so the sim's RPDO-event
+         * adoption path keeps the vmotor running. Without this the
+         * cia402_master walk ends, no more RPDO arrives, and the sim
+         * never applies setpoints via SDO writes alone. */
+        m_can.armPdoTx(static_cast<uint32_t>(idx), kCwEnableOperation);
+        emit controlwordCached(idx, kCwEnableOperation);
     }
 }
 
@@ -257,6 +284,9 @@ void MasterWorker::enableOne(int idx)
     if (!m_mgr){ return; }
     if (master_mgr_enable_one(m_mgr, idx) != 0){
         emit error(QStringLiteral("enable slave %1 failed").arg(idx));
+    } else {
+        m_can.armPdoTx(static_cast<uint32_t>(idx), kCwEnableOperation);
+        emit controlwordCached(idx, kCwEnableOperation);
     }
 }
 
@@ -264,15 +294,116 @@ void MasterWorker::disableOne(int idx)
 {
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ return; }
+    /* Stop streaming controlword 0x0F before the SDK walks the slave
+     * back down to SwitchOnDisabled — otherwise the keep-alive races
+     * the disable walk the same way it raced the bring-up. */
+    m_can.disarmPdoTx(static_cast<uint32_t>(idx));
+    emit controlwordCached(idx, 0);
     if (master_mgr_disable_one(m_mgr, idx) != 0){
         emit error(QStringLiteral("disable slave %1 failed").arg(idx));
     }
+}
+
+void MasterWorker::customSdoRead(int slaveIdx, uint16_t odIdx, uint8_t sub, int byteLen)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit customSdoDone(slaveIdx, /*isWrite=*/false, odIdx, sub, false,
+                           QString(), QStringLiteral("not connected"));
+        return;
+    }
+    if (byteLen <= 0 || byteLen > 8){
+        emit customSdoDone(slaveIdx, false, odIdx, sub, false,
+                           QString(),
+                           QStringLiteral("byteLen must be 1..8 for expedited SDO"));
+        return;
+    }
+    uint8_t buf[8] = {0};
+    QString err;
+    const int rc = m_can.readSdo(slaveIdx, odIdx, sub, buf, byteLen, &err);
+    if (rc != 0){
+        emit customSdoDone(slaveIdx, false, odIdx, sub, false, QString(), err);
+        return;
+    }
+    /* Format as little-endian unsigned hex so the operator sees the
+     * canonical wire value (matches how SDO bytes get laid out). */
+    QString hex = QStringLiteral("0x");
+    for (int i = byteLen - 1; i >= 0; --i){
+        hex += QStringLiteral("%1").arg(buf[i], 2, 16, QChar('0'));
+    }
+    emit customSdoDone(slaveIdx, false, odIdx, sub, true, hex, QString());
+}
+
+void MasterWorker::customSdoWrite(int slaveIdx, uint16_t odIdx, uint8_t sub,
+                                  QByteArray bytes)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit customSdoDone(slaveIdx, /*isWrite=*/true, odIdx, sub, false,
+                           QString(), QStringLiteral("not connected"));
+        return;
+    }
+    if (bytes.isEmpty() || bytes.size() > 8){
+        emit customSdoDone(slaveIdx, true, odIdx, sub, false, QString(),
+                           QStringLiteral("payload size must be 1..8 bytes"));
+        return;
+    }
+    QString err;
+    const int rc = m_can.writeSdo(slaveIdx, odIdx, sub,
+                                  bytes.constData(),
+                                  static_cast<uint32_t>(bytes.size()), &err);
+    emit customSdoDone(slaveIdx, true, odIdx, sub,
+                       /*ok=*/(rc == 0), QString(),
+                       rc == 0 ? QString() : err);
+}
+
+void MasterWorker::walkControlwordOne(int idx, uint16_t cw)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){ return; }
+    /* Push one direct PDO with the requested cw, then arm tx_active
+     * so the keep-alive holds the value on subsequent ticks. The
+     * operator is intentionally driving the state machine by hand;
+     * we trust them. */
+    m_can.disarmPdoTx(static_cast<uint32_t>(idx));
+    (void)m_can.pdoSend(static_cast<uint32_t>(idx), cw, 0, 0, 0);
+    m_can.armPdoTx    (static_cast<uint32_t>(idx), cw);
+    emit controlwordCached(idx, cw);
+    emit info(QStringLiteral("walk slave %1: cw=0x%2")
+              .arg(idx).arg(cw, 4, 16, QChar('0')));
+}
+
+void MasterWorker::quickStopOne(int idx)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){ return; }
+    /* Quick Stop is "controlled decel to standstill", not "disable".
+     * Sequence:
+     *   1. Disarm the per-tick keep-alive so cw=0x000F isn't being
+     *      streamed (would defeat the Quick Stop bit).
+     *   2. Issue one direct RPDO with cw=0x0002 (Enable Voltage + Quick
+     *      Stop bit cleared). Slave begins decel using its
+     *      Quick stop deceleration (0x6085) and ends in
+     *      QUICK_STOP_ACTIVE.
+     *   3. Re-arm with cw=0x0002 so the next ticks keep holding the
+     *      Quick Stop request (without re-arming, the next PDO send
+     *      from setTarget() could undo the request). */
+    m_can.disarmPdoTx(static_cast<uint32_t>(idx));
+    (void)m_can.pdoSend(static_cast<uint32_t>(idx), kCwQuickStop, 0, 0, 0);
+    m_can.armPdoTx    (static_cast<uint32_t>(idx), kCwQuickStop);
+    emit controlwordCached(idx, kCwQuickStop);
+    emit info(QStringLiteral("quick stop slave %1 (cw=0x%2)")
+              .arg(idx).arg(kCwQuickStop, 4, 16, QChar('0')));
 }
 
 void MasterWorker::faultReset(int idx)
 {
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ return; }
+    /* Fault reset transitions Fault → SwitchOnDisabled; the operator
+     * must re-bringup before commands flow again. */
+    m_can.disarmPdoTx(static_cast<uint32_t>(idx));
+    emit controlwordCached(idx, 0);
     if (master_mgr_fault_reset_one(m_mgr, idx) != 0){
         emit error(QStringLiteral("fault reset slave %1 failed").arg(idx));
     }
@@ -302,6 +433,20 @@ void MasterWorker::setTarget(int idx, TargetKind which, float value)
     case TargetKind::Velocity: c.vel = value; break;
     case TargetKind::Torque:   c.trq = value; break;
     }
+
+    /* Also push the latest cached targets into the per-tick PDO cache so
+     * the next keep-alive frame carries them. Until the slave is armed
+     * (post-bring-up) these writes are silent; once armed the sim sees
+     * fresh setpoints in every RPDO and applies them via
+     * apply_cia402_targets. Reverse of the per-tick SI-conversion in
+     * onTick (line 193-195). */
+    const int32_t pos_counts = static_cast<int32_t>(c.pos / kRadPerCount);
+    const int32_t vel_counts = static_cast<int32_t>(c.vel / kRadPerCount);
+    const double  trq_perm_d = std::clamp(
+        static_cast<double>(c.trq) / kRatedTorqueNm * 1000.0,
+        -32768.0, 32767.0);
+    const int16_t trq_perm   = static_cast<int16_t>(trq_perm_d);
+    m_can.setTarget(static_cast<uint32_t>(idx), pos_counts, vel_counts, trq_perm);
 }
 
 void MasterWorker::setId(int idx, uint8_t newId)
@@ -327,8 +472,21 @@ void MasterWorker::disableAll()
         if (genIdx >= 0){ emit generatorStopped(genIdx); }
     }
     if (!m_mgr){ return; }
+
+    /* Critical: disarm every slot's PDO keep-alive BEFORE running the
+     * SDO disable walk. The per-tick pdoTick streams controlword
+     * 0x000F (Enable Operation) for every armed slot — if it fires
+     * between master_mgr_disable_all's writes and the slave's state
+     * update, the slave snaps right back to OPERATION_ENABLED. Same
+     * race as the bring-up keep-alive (see bringupOne for the
+     * symmetric case). */
+    const uint32_t n_slots = m_can.slaveCount();
+    for (uint32_t i = 0; i < n_slots; ++i){
+        m_can.disarmPdoTx(i);
+        emit controlwordCached(static_cast<int>(i), 0);
+    }
     const int n = master_mgr_disable_all(m_mgr);
-    emit info(QStringLiteral("E-STOP: disabled %1 slave(s)").arg(n));
+    emit info(QStringLiteral("E-STOP: disabled %1 slave(s) (PDO keep-alive disarmed)").arg(n));
 }
 
 /* --- Gain r/w -------------------------------------------------------- */
@@ -418,12 +576,18 @@ struct DriveField {
     uint8_t  sub;
     uint8_t  len;
     void*    ptr;
+    bool     readonly;     /**< write pass skips RO entries (e.g. 0x6078) */
 };
 
 template <typename T>
 static DriveField fld(uint16_t i, uint8_t s, T& v)
 {
-    return { i, s, uint8_t(sizeof(T)), &v };
+    return { i, s, uint8_t(sizeof(T)), &v, /*readonly=*/false };
+}
+template <typename T>
+static DriveField fldRO(uint16_t i, uint8_t s, T& v)
+{
+    return { i, s, uint8_t(sizeof(T)), &v, /*readonly=*/true };
 }
 
 static QVector<DriveField> driveFields(DriveConfig& c)
@@ -446,12 +610,43 @@ static QVector<DriveField> driveFields(DriveConfig& c)
         fld(0x607D, 2, c.pos_limit_max),
         fld(0x6080, 0, c.max_motor_speed),
         fld(0x6072, 0, c.max_torque),
+        fld(0x6076, 0, c.rated_torque),      /* mNm                        */
+        fldRO(0x6078, 0, c.current_actual),  /* per-mille of rated I (RO)  */
 
         fld(0x608F, 1, c.enc_resolution),
         fld(0x6091, 1, c.gear_num),
         fld(0x6091, 2, c.gear_den),
         fld(0x6092, 1, c.feed_const_num),
         fld(0x6092, 2, c.feed_const_den),
+
+        /* Manufacturer range (0x20xx). Slaves that don't expose them
+         * silently abort with 0x06020000 on Read; the driveFields
+         * read loop counts those as failures but doesn't bail. */
+        fld(0x2000, 0, c.node_id),
+        fld(0x2010, 0, c.manuf_cur_kp),
+        fld(0x2011, 0, c.manuf_cur_ki),
+        fld(0x2020, 0, c.manuf_vel_kp),
+        fld(0x2021, 0, c.manuf_vel_ki),
+        fld(0x2030, 0, c.manuf_pos_kp),
+        fld(0x2031, 0, c.manuf_pos_ki),
+        fld(0x2040, 1, c.current_offset_a),
+        fld(0x2040, 2, c.current_offset_b),
+        fld(0x2040, 3, c.current_offset_c),
+        fld(0x2041, 1, c.current_gain_a),
+        fld(0x2041, 2, c.current_gain_b),
+        fld(0x2041, 3, c.current_gain_c),
+
+        /* Fault thresholds — 10 sub-indices under 0x2050. */
+        fld(0x2050, 1,  c.over_current),
+        fld(0x2050, 2,  c.over_load),
+        fld(0x2050, 3,  c.over_load_ms),
+        fld(0x2050, 4,  c.current_loss_phase),
+        fld(0x2050, 5,  c.current_loss_phase_ms),
+        fld(0x2050, 6,  c.unbalance_current),
+        fld(0x2050, 7,  c.stall_ms),
+        fld(0x2050, 8,  c.over_voltage),
+        fld(0x2050, 9,  c.under_voltage),
+        fld(0x2050, 10, c.over_temperature),
     };
 }
 
@@ -531,14 +726,17 @@ void MasterWorker::writeDriveConfig(int idx, DriveConfig cfg)
     }
     auto fields = driveFields(cfg);
     QStringList failures;
+    int written = 0;
     for (const auto& f : fields){
+        if (f.readonly){ continue; }   /* skip current_actual etc. */
         QString err;
         const int rc = m_can.writeSdo(idx, f.idx, f.sub, f.ptr, f.len, &err);
         if (rc != 0){ failures << err; }
+        else         { ++written; }
     }
     if (failures.isEmpty()){
         emit info(QStringLiteral("drive config: slave %1 written (%2 fields)")
-                      .arg(idx).arg(fields.size()));
+                      .arg(idx).arg(written));
         emit driveConfigWritten(idx, true, QString());
     } else {
         const QString msg = failures.join(QStringLiteral("\n"));
@@ -715,6 +913,23 @@ void MasterWorker::onGenTick()
     case TargetKind::Velocity: c.vel = value; break;
     case TargetKind::Torque:   c.trq = value; break;
     }
+
+    /* Push the latest cached targets into the per-tick PDO TX cache
+     * so the keep-alive frame carries them on the wire. Without this
+     * the generator only touched the OD via SDO, which the sim does
+     * NOT poll — its vmotor only adopts new targets when an RPDO
+     * arrives (apply_cia402_targets in vrmc_sim.c), so the
+     * step / sine / chirp signals never reached the plant and the
+     * Tuning charts showed flat lines. Same dance as
+     * MasterWorker::setTarget above. */
+    const int32_t pos_counts = static_cast<int32_t>(c.pos / kRadPerCount);
+    const int32_t vel_counts = static_cast<int32_t>(c.vel / kRadPerCount);
+    const double  trq_perm_d = std::clamp(
+        static_cast<double>(c.trq) / kRatedTorqueNm * 1000.0,
+        -32768.0, 32767.0);
+    const int16_t trq_perm   = static_cast<int16_t>(trq_perm_d);
+    m_can.setTarget(static_cast<uint32_t>(m_genIdx),
+                    pos_counts, vel_counts, trq_perm);
 }
 
 }  // namespace vrmc

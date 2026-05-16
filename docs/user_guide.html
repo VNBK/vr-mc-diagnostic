@@ -83,529 +83,637 @@
     h2 { page-break-after:avoid; }
     figure, table, .note, .warn, pre { page-break-inside:avoid; }
   }
+  /* Branded document header — VinRobotics logo to the left of the
+     title. Matches the look of the vr-hand user-guide for visual
+     family consistency. */
+  .doc-header {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    border-bottom: 2px solid #003c80;
+    padding-bottom: 16px;
+    margin: 0 0 22px;
+  }
+  .doc-header .doc-logo {
+    width: 140px; height: 140px; flex: 0 0 auto;
+    object-fit: contain;
+    border: none; background: transparent; border-radius: 0;
+  }
+  .doc-header h1 {
+    margin: 0; padding: 0; border: none;
+    font-size: 26pt;
+  }
+  .doc-header .doc-meta {
+    margin: 4px 0 0; color: var(--muted);
+  }
 </style>
 </head>
 <body>
-
-<header class="cover">
-  <div class="mark"><span class="dot"></span><strong>VinRobotic</strong></div>
-  <h1>VR Motor Control Diagnostic Tool</h1>
-  <div class="sub">Operator and Commissioning Guide — Qt 6 desktop diagnostic for CiA 402 motor drives</div>
-  <div class="meta">
-    <span class="badge">v1.0</span> &nbsp;
-    Powered by <code>vr-mc-sdk</code> · built against Qt 6 · transports: UDP-multicast CAN (<code>hal_can_udp</code>) + ZLG USB-CANFD (<code>hal_can_zlg</code>)
-  </div>
-</header>
-
-<section class="toc">
-  <h2 style="border:none; margin-top:0;">Contents</h2>
-  <ol>
-    <li><strong>1.</strong> Overview &amp; architecture</li>
-    <li><strong>2.</strong> Install &amp; first run</li>
-    <li><strong>3.</strong> Connecting to drives</li>
-    <li><strong>4.</strong> Main window tour</li>
-    <li><strong>5.</strong> Left-tab panels (Control · Gains · Signal generator)</li>
-    <li><strong>6.</strong> Detachable panes (Profile · Tuning · PDO map)</li>
-    <li><strong>7.</strong> Configure Drive dialog — homing, motion, protection, encoder</li>
-    <li><strong>8.</strong> Commissioning workflows (start-to-finish)</li>
-    <li><strong>9.</strong> Tuning workflows (step response &amp; Bode)</li>
-    <li><strong>10.</strong> PDO mapping — read, edit, apply</li>
-    <li><strong>11.</strong> Telemetry recording &amp; export</li>
-    <li><strong>12.</strong> Emergency stop</li>
-    <li><strong>13.</strong> Keyboard shortcuts</li>
-    <li><strong>14.</strong> Troubleshooting</li>
-    <li><strong>App. A.</strong> Transports in detail</li>
-    <li><strong>App. B.</strong> CiA 402 OD reference</li>
-    <li><strong>App. C.</strong> Command-line flags</li>
-  </ol>
-</section>
-
-<h2>1. Overview &amp; architecture</h2>
-<p>
-  The diagnostic is a standalone Qt 6 desktop application that reads and
-  writes CiA 402 motor drives over a <code>hal_can</code> transport
-  (UDP-multicast for loopback / bench work, ZLG USB-CANFD for real
-  drives). It wraps the <code>master_mgr</code> +
-  <code>motor_drive_interface</code> C layers from <code>vr-mc-sdk</code>
-  in a dedicated Qt worker thread, surfaces live TPDO telemetry in a
-  QtCharts scope, and exposes every commissioning knob through
-  modeless dialogs that can sit next to the main window while the
-  operator works.
-</p>
-
-<figure class="svg wide">
-  <img src="images/architecture.svg" alt="Architecture layers">
-  <figcaption>Fig. 1 — Runtime architecture. The Qt UI thread never calls the C SDK directly; <code>MasterWorker</code> owns the master stack on its own <code>QThread</code> and communicates via queued signals/slots.</figcaption>
-</figure>
-
-<p>The layering is intentional:</p>
-<ul>
-  <li><strong>UI thread</strong> builds widgets, routes user input, paints charts. Never blocks on SDO.</li>
-  <li><strong>Worker thread</strong> owns <code>master_mgr_t</code>, runs the periodic refresh, and performs all SDO read/write work. Emits a snapshot signal at 100 Hz.</li>
-  <li><strong>SDK layer</strong> (C code) — <code>master_mgr</code> fans out to per-slave <code>motor_drive_interface</code>; the CiA 402 implementation talks to <code>co_fd_usdo</code> (SDO) and <code>can_fd_pdo</code> (PDO) over a <code>hal_can</code> vtable.</li>
-  <li><strong>Transport layer</strong> — <code>hal_can_udp</code> or <code>hal_can_zlg</code> concrete, chosen at connect time.</li>
-</ul>
-
-<div class="note">
-  <strong>Thread safety.</strong> Every exchange between the UI and the
-  worker goes through Qt signals with <code>Qt::QueuedConnection</code>.
-  No raw pointer handoffs, no shared-state races. Even the periodic
-  refresh grabs the worker's mutex, so an Apply press and a refresh
-  tick serialise naturally.
+<div class="doc-header">
+  <img src="images/vinrobotic.png" alt="VinRobotics" class="doc-logo"/>
+  <h1>VR Motor Control Diagnostic Tool — User Guide</h1>
+  <p class="doc-meta"><strong>Version 1.0</strong> · <em>Audience:</em> commissioning engineers, firmware developers</p>
 </div>
 
-<h2>2. Install &amp; first run</h2>
-
-<h3>2.1 Prerequisites</h3>
-<ul>
-  <li>Qt 6.2 or newer (Core, Gui, Widgets, Charts).</li>
-  <li>CMake 3.16+, a C++17 compiler.</li>
-  <li>Linux host — <code>hal_can_udp</code> uses BSD sockets + multicast; <code>hal_can_zlg</code> loads <code>libcontrolcanfd.so</code>.</li>
-  <li>For the ZLG path: a USB-CANFD adapter plugged in.</li>
-</ul>
-
-<h3>2.2 Build from source</h3>
-<pre>git clone …/vr-hand
-cd vr-hand/vr-mc-diagnostic
-cmake -S . -B build
-cmake --build build --target vr_mc_diagnostic -j
-./build/vr_mc_diagnostic</pre>
-
-<h3>2.3 Loopback bring-up (no hardware)</h3>
-<p>
-  The SDK ships a CiA 402 simulator you can use to bring the diagnostic
-  up without a real drive. Run it in one terminal, then launch the
-  diagnostic in another:
-</p>
-<pre>./vr-mc-sdk/build/app/motor_drive_cia402 --udp --node 5
-./vr-mc-diagnostic/build/vr_mc_diagnostic --auto-connect</pre>
-<p>
-  The simulator emits TPDO1 at 2 kHz on multicast
-  <code>239.192.0.42:23400</code>; <code>--auto-connect</code> wires the
-  diagnostic to the same group and pulls up node id 5.
-</p>
-
-<h2>3. Connecting to drives</h2>
-
-<h3>3.1 Opening the Connect dialog</h3>
-<p>
-  From the menu: <strong>Connection → Connect…</strong>. From the
-  keyboard: <code>Ctrl+K</code>. The dialog offers two transports:
-</p>
-
-<table>
-  <thead><tr><th>Transport</th><th>Fields</th><th>When to use</th></tr></thead>
-  <tbody>
-    <tr>
-      <td><strong>UDP multicast</strong></td>
-      <td>Group (<code>239.192.0.42</code>), Port (<code>23400</code>)</td>
-      <td>Loopback against the <code>motor_drive_cia402</code> simulator, multi-host bench.</td>
-    </tr>
-    <tr>
-      <td><strong>ZLG USB-CANFD</strong></td>
-      <td>Channel index, arbitration bitrate, data-phase bitrate</td>
-      <td>Real drives on a USB-CANFD adapter.</td>
-    </tr>
-  </tbody>
-</table>
-<p>
-  Both transports take <strong>First node id</strong> and
-  <strong>Count</strong>. The diagnostic sequentially registers that
-  range of slaves into <code>master_mgr</code>, each gaining a row in
-  the table.
-</p>
-
-<h3>3.2 After Connect</h3>
-<ul>
-  <li>Status bar flips to <em>connected</em> with the slave count.</li>
-  <li>Table fills: <em>state = offline</em> transitions to the live
-      statusword-decoded string once TPDO1 starts flowing.</li>
-  <li><strong>Reconnect</strong> (<code>Ctrl+R</code>) replays the last
-      config without re-opening the dialog.</li>
-  <li><strong>Disconnect</strong> tears everything down idempotently —
-      worker thread stays alive for the next connect.</li>
-</ul>
-
-<h2>4. Main window tour</h2>
-
-<figure class="svg wide">
-  <img src="images/window_layout.svg" alt="Annotated layout">
-  <figcaption>Fig. 2 — Annotated layout. The frame is fixed; the left tabs and telemetry chart expand to fill; detachable panes dock on the right or float as top-level windows.</figcaption>
-</figure>
-
-<figure class="wide">
-  <img src="images/main_window.png" alt="Main window, connected to the simulator">
-  <figcaption>Fig. 3 — Main window connected to the loopback simulator. Slave <code>cia402-node-5</code> is registered and online; the log confirms PDO traffic (<code>rx=66, statusword=0x0250</code>).</figcaption>
-</figure>
-
-<h3>4.1 Toolbar groups</h3>
-<p>Left to right, the toolbar is grouped by intent:</p>
+<hr>
+<h2 id="contents">Contents</h2>
 <ol>
-  <li><strong>File</strong> — Open / Save motor profile.</li>
-  <li><strong>Connection</strong> — Connect… / Disconnect / Reconnect.</li>
-  <li><strong>View</strong> — toggle the Profile, Tuning, and PDO map docks. Same actions also live in the <strong>View</strong> menu.</li>
-  <li><strong>Drive</strong> — Configure Drive… (Ctrl+Shift+C) + Upload Firmware.</li>
-  <li><strong>Data</strong> — Record telemetry + Clear charts.</li>
-  <li><strong>Help</strong> — About.</li>
-  <li><strong>E-STOP</strong> — always on the right, always clickable, shortcut <code>Space</code>.</li>
+<li>First run with Demo</li>
+<li>Connecting to drives</li>
+<li>Main window tour</li>
+<li>Left-tab panels (Control · Gains · Signal generator)</li>
+<li>Detachable panes (Profile · Tuning · PDO map)</li>
+<li>Configure Drive dialog</li>
+<li>Commissioning workflow</li>
+<li>Tuning workflows</li>
+<li>PDO mapping — read, edit, apply</li>
+<li>Telemetry recording &amp; export</li>
+<li>Emergency stop</li>
+<li>Keyboard shortcuts</li>
+<li>Troubleshooting</li>
+<li>Appendix A — Transports</li>
+<li>Appendix B — CiA 402 OD reference</li>
+<li>Appendix C — Command-line flags</li>
 </ol>
-
-<h3>4.2 Slave table</h3>
-<p>
-  One row per slave. Columns: <em>idx · id · name · state · online · pos
-  · vel · trq</em>. Selecting a row routes it to every per-slave panel —
-  Control, Gains, Signal gen, Telemetry, and the dialogs that need a
-  target.
-</p>
-
-<h2>5. Left-tab panels</h2>
-
-<h3>5.1 Control tab</h3>
-<p>Drives the CiA 402 state machine. Each button issues a controlword transition through <code>master_mgr_*_one</code>:</p>
-
-<figure class="svg wide">
-  <img src="images/cia402_states.svg" alt="CiA 402 state machine">
-  <figcaption>Fig. 4 — CiA 402 state machine. Control-tab buttons pulse the controlword; telemetry reports the resulting statusword back through TPDO1.</figcaption>
-</figure>
-
-<ul>
-  <li><strong>Bringup</strong> — walks the drive from <em>Not Ready to Switch On</em> to <em>Switched On</em>.</li>
-  <li><strong>Enable</strong> — final transition into <em>Operation Enabled</em>. Only state that accepts motion commands.</li>
-  <li><strong>Disable</strong> — back to <em>Switched On</em>, torque off.</li>
-  <li><strong>Fault reset</strong> — pulses controlword bit 7 to clear a fault; drive lands in <em>Switch On Disabled</em>.</li>
-</ul>
-<p>
-  <strong>Mode</strong> selector picks <em>none · torque · velocity ·
-  position</em>; <strong>Setpoint</strong> sends the numeric target. Both
-  route through <code>master_mgr_set_target_one</code>.
-</p>
-
-<h3>5.2 Gains tab</h3>
-<figure class="wide">
-  <img src="images/gains.png" alt="Gains tab">
-  <figcaption>Fig. 5 — Per-loop Kp/Ki editor. <strong>Read</strong> pulls the drive's current values via SDO, <strong>Write</strong> pushes edited values back.</figcaption>
-</figure>
-<p>Three loops (<em>current · velocity · position</em>) with independent Kp and Ki entry. Reads round-trip through <code>motor_drive_intf_get_gain</code>; writes go through <code>motor_drive_intf_set_gain</code>.</p>
-
-<h3>5.3 Signal generator</h3>
-<figure class="wide">
-  <img src="images/signal_gen.png" alt="Signal generator tab">
-  <figcaption>Fig. 6 — Signal generator. Waveforms: constant, step, ramp, sine, chirp. Target channel, amplitude, offset, frequency, duration, and update rate are all operator-tunable.</figcaption>
-</figure>
-<ul>
-  <li><strong>Constant / Step</strong> — one-shot setpoint.</li>
-  <li><strong>Ramp</strong> — slope = amplitude / duration.</li>
-  <li><strong>Sine</strong> — pure tone at the given frequency.</li>
-  <li><strong>Chirp</strong> — log-swept sine from frequency start → end across duration; feeds the Bode view.</li>
-</ul>
-
-<h2>6. Detachable panes</h2>
-<p>Profile, Tuning, and PDO map are created as <code>QDockWidget</code>s — hidden and floating by default so the main window stays uncluttered. Clicking their toolbar button (or the <strong>View</strong> menu entry) surfaces the dock; the operator can float or re-dock it to any edge of the main window.</p>
-
-<h3>6.1 Motor profile</h3>
-<figure class="wide">
-  <img src="images/profile.png" alt="Profile dock">
-  <figcaption>Fig. 7 — Profile dock re-docked to the right. Read-only 15-row table covers nameplate params (type, pole pairs, R<sub>s</sub>, L<sub>sd</sub>, L<sub>sq</sub>, rated flux, inertia) + voltage and current limits.</figcaption>
-</figure>
-<p><strong>Edit…</strong> opens a modal form editor. <strong>File → Save Profile</strong> persists to JSON.</p>
-
-<h3>6.2 Tuning</h3>
-<figure class="wide">
-  <img src="images/tuning.png" alt="Tuning dock">
-  <figcaption>Fig. 8 — Tuning dock with the Step sub-tab active. Set target channel, step size, offset, and duration; <strong>Run step</strong> triggers the generator and the pane overlays command vs. actual.</figcaption>
-</figure>
-<ul>
-  <li><strong>Step</strong> — reports overshoot (%), 10–90 % rise time, and steady-state error.</li>
-  <li><strong>Bode</strong> — log-sweep chirp + Goertzel-correlation yields magnitude (dB) and phase (°) vs. frequency on a log axis.</li>
-</ul>
-
-<h3>6.3 PDO map</h3>
-<figure class="wide">
-  <img src="images/pdo_map.png" alt="PDO map dock">
-  <figcaption>Fig. 9 — PDO map dock. Two sections (TPDO1 slave→master, RPDO1 master→slave). Each row shows offset, OD index, sub, bits, name, and a live-decoded value tracked off the latest snapshot.</figcaption>
-</figure>
-
-<h2>7. Configure Drive</h2>
-<p><strong>Drive → Configure Drive…</strong> (<code>Ctrl+Shift+C</code>) opens a modeless tabbed dialog targeted at the currently-selected slave. The dialog kicks off an SDO read on open so the form reflects what's on the drive, not a blank default.</p>
-
-<figure>
-  <img src="images/drive_config.png" alt="Configure Drive dialog" style="max-width:520px;">
-  <figcaption>Fig. 10 — Configure Drive dialog, Homing tab. Every field labeled with its CiA 402 OD coordinate. Status banner at the bottom decodes statusword bits 10 / 12 / 13 in real time while homing runs.</figcaption>
-</figure>
-
-<h3>7.1 Homing tab</h3>
-<table>
-  <thead><tr><th>Field</th><th>OD</th><th>Notes</th></tr></thead>
-  <tbody>
-    <tr><td>Method</td><td><code>0x6098</code></td><td>Combobox with standard CiA 402 methods (0, 1, 2, 7, 11, 17, 18, 23, 27, 33–35, 37, −1, −2).</td></tr>
-    <tr><td>Home offset</td><td><code>0x607C</code></td><td>Origin shift applied by the drive after homing completes.</td></tr>
-    <tr><td>Switch search speed</td><td><code>0x6099:1</code></td><td>Fast approach until a switch / limit edge is detected.</td></tr>
-    <tr><td>Zero search speed</td><td><code>0x6099:2</code></td><td>Slow creep onto the actual zero (index / hard stop).</td></tr>
-    <tr><td>Homing acceleration</td><td><code>0x609A</code></td><td>Ramp to the search speeds.</td></tr>
-  </tbody>
-</table>
-<p>Two commissioning one-shots live below the form:</p>
-<ul>
-  <li><strong>Start Homing</strong> — writes mode = 6 to <code>0x6060</code>, then pulses controlword bit 4 on <code>0x6040</code> (<code>0x000F → 0x001F</code>). Status banner decodes statusword bits 10, 12, 13 live.</li>
-  <li><strong>Zero encoder here</strong> — reads position_actual (<code>0x6064</code>), writes it into home_offset (<code>0x607C</code>), and updates the form field so Apply will persist it.</li>
-</ul>
-
-<figure class="svg wide">
-  <img src="images/homing_sequence.svg" alt="Start Homing sequence">
-  <figcaption>Fig. 11 — Start Homing message sequence. Three SDO writes kick the drive; progress comes back through the existing TPDO1 statusword stream, so no polling is needed.</figcaption>
-</figure>
-
-<h3>7.2 Motion profile tab</h3>
-<ul>
-  <li>Profile velocity — <code>0x6081</code></li>
-  <li>Profile acceleration — <code>0x6083</code></li>
-  <li>Profile deceleration — <code>0x6084</code></li>
-  <li>Quickstop deceleration — <code>0x6085</code></li>
-</ul>
-<p>These set the trapezoidal profile the drive uses when it moves under <em>Profile Position</em> / <em>Profile Velocity</em> modes (CiA 402 modes 1 / 3). Quick-stop decel is what the drive uses when E-STOP issues controlword 0x02.</p>
-
-<h3>7.3 Protection tab</h3>
-<ul>
-  <li>Max following error — <code>0x6065</code> (counts); faults the drive if position error exceeds it.</li>
-  <li>Following error window — <code>0x6066</code> (ms); how long the error has to persist.</li>
-  <li>Position limit min / max — <code>0x607D:1,2</code>; hard software travel limits.</li>
-  <li>Max motor speed — <code>0x6080</code> (counts/s).</li>
-  <li>Max torque — <code>0x6072</code> (‰ of rated).</li>
-</ul>
-<p><strong>Zero torque here</strong> reads torque_actual (<code>0x6077</code>) and writes it into torque_offset (<code>0x60B2</code>). Lets the current loading read as zero — useful when taring against gravity.</p>
-
-<h3>7.4 Encoder tab</h3>
-<ul>
-  <li>Resolution — <code>0x608F:1</code> (counts per revolution).</li>
-  <li>Gear numerator / denominator — <code>0x6091:1,2</code>.</li>
-  <li>Feed constant numerator / denominator — <code>0x6092:1,2</code>.</li>
-</ul>
-
-<h3>7.5 Buttons</h3>
-<ul>
-  <li><strong>Read from drive</strong> — batch SDO upload over the full field set. Missing OD entries are reported in the log but don't abort the batch.</li>
-  <li><strong>Apply</strong> — batch SDO download. Partial failures land in the log with per-field reason codes + a warning dialog.</li>
-  <li><strong>OK</strong> — Apply + close. <strong>Cancel</strong> — discard.</li>
-</ul>
-
-<h2>8. Commissioning workflow</h2>
-
-<figure class="svg wide">
-  <img src="images/commissioning_flow.svg" alt="Commissioning flow">
-  <figcaption>Fig. 12 — End-to-end commissioning — from cold connect to tuned and saved, in six steps.</figcaption>
-</figure>
-
+<hr>
+<h2 id="1-first-run-with-demo">1. First run with Demo</h2>
+<p>The fastest way to verify the install is to use the bundled simulator
+— no real hardware, no extra terminals. Launch the diagnostic, then:</p>
 <ol>
-  <li><strong>Connect</strong> (<code>Ctrl+K</code>). Pick transport, set node range, Connect. Confirm the row in the table turns <em>online = yes</em>.</li>
-  <li><strong>Bring up</strong>. Select the row, open <strong>Control</strong>, click <strong>Bringup</strong>. State walks to <em>Switched On</em>. Click <strong>Enable</strong>. State: <em>Operation Enabled</em>.</li>
-  <li><strong>Configure</strong>. <strong>Drive → Configure Drive…</strong> → <strong>Read from drive</strong>. Review the Protection tab: pos limits and max torque should reflect the mechanical envelope. Apply.</li>
-  <li><strong>Home</strong>. On the Homing tab, either click <strong>Start Homing</strong> for a method-driven sweep, or drive the joint to a known position and click <strong>Zero encoder here</strong> to capture it as the origin.</li>
-  <li><strong>Tune</strong>. Open the <strong>Gains</strong> tab, <strong>Read</strong> the starting Kp/Ki. Use the <strong>Tuning</strong> dock: run a step response, read overshoot / rise time, adjust. For rotational dynamics, run a Bode sweep via the chirp waveform.</li>
-  <li><strong>Save</strong>. <strong>File → Save Profile</strong> writes the edited nameplate JSON. Save to Flash via <strong>Drive → Save Config to Flash</strong> (planned) persists runtime params on the drive side.</li>
+<li><strong>Help → Start demo…</strong></li>
+<li>Pick a slave count (default 3, range 1–32).</li>
+<li>The diagnostic spawns that many <code>vrmc_sim</code> processes on UDP
+   multicast <code>239.192.0.42:23400</code> with sequential node IDs (5, 6,
+   7, …) and <strong>auto-connects</strong>.</li>
+<li>The slave list populates, MotorView lights up for the first
+   slave, and the telemetry pane starts plotting position /
+   velocity / torque.</li>
 </ol>
-
-<div class="warn">
-  <strong>Always have an exit.</strong> Keep one hand near <code>Space</code>
-  (E-STOP) the first time you enable a new drive. The diagnostic has no
-  opinion about your mechanics — if limits aren't set right, motion can
-  escape the safe envelope within a control cycle.
-</div>
-
-<h2>9. Tuning workflows</h2>
-
-<h3>9.1 Step response</h3>
-<ol>
-  <li>Drive must be in <em>Operation Enabled</em> and in the target mode (e.g. <em>Profile Position</em>).</li>
-  <li>Tuning dock → <strong>Step</strong> sub-tab. Pick target channel (position / velocity / torque), step size, offset, duration.</li>
-  <li>Click <strong>Run step</strong>. The diagnostic overlays cmd vs. actual on the chart and computes overshoot (%), rise time (10 → 90 %), and steady-state error.</li>
-  <li>Iterate: increase Kp until overshoot becomes visible, back off 20 %, then add Ki to kill the steady-state error.</li>
-</ol>
-
-<h3>9.2 Bode sweep</h3>
-<ol>
-  <li>Tuning dock → <strong>Bode</strong> sub-tab. Set frequency start / end (typically 1 Hz → 200 Hz) and sweep duration (30 s is generous).</li>
-  <li><strong>Run sweep</strong>. The diagnostic fires a chirp waveform; for each frequency the signal generator emits, a Goertzel correlator extracts in-phase and quadrature components of the measured output.</li>
-  <li>Read magnitude crossover (−3 dB) and phase margin from the plot. Loop-shape accordingly.</li>
-</ol>
-
-<h2>10. PDO mapping — read, edit, apply</h2>
-
-<p>The diagnostic's PDO layer uses two <code>hal_can</code> endpoints — one for SDO, one for PDO. Keeping them separate avoids the single-consumer <code>hal_can_set_cb</code> from shadowing either traffic:</p>
-
-<figure class="svg wide">
-  <img src="images/transport_paths.svg" alt="Transport paths">
-  <figcaption>Fig. 13 — SDO and PDO take different paths through the stack. SDO is request/response with 100 ms timeout; PDO is a 2 kHz push into a ring buffer drained by the worker.</figcaption>
-</figure>
-
-<p>Editing the mapping happens via the PDO map dock:</p>
-<ol>
-  <li>Click <strong>Edit…</strong> under TPDO1 or RPDO1.</li>
-  <li>Add entries from the CiA 402 object catalog (Controlword, Statusword, Target / Actual Position, Velocity, Torque, Error Code, DC link voltage, …). Rearrange with Up / Down. Each entry contributes <code>bit_length / 8</code> bytes to the frame.</li>
-  <li>Click <strong>OK</strong>. The diagnostic runs the CiA 301 §7.2.2.2 remap dance via SDO:</li>
-</ol>
-
-<figure class="svg wide">
-  <img src="images/pdo_remap.svg" alt="PDO remap dance">
-  <figcaption>Fig. 14 — CiA 301 remap dance. Every arrow is one SDO write. The drive validates the resulting mapping on the step-4 commit and rejects anything that overflows 64 B or references a missing OD entry.</figcaption>
-</figure>
-
-<div class="note">
-  <strong>Note.</strong> Against the in-tree simulator the PDO config
-  objects (<code>0x1600</code> / <code>0x1A00</code> and friends) are
-  not exposed, so the remap aborts per-step with SDO abort code
-  <code>0x06020000</code>. The log surfaces the per-step reason. On a
-  real CiA 402 drive the sequence completes and TPDO layout changes
-  take effect on the next PDO emission.
-</div>
-
-<h2>11. Telemetry recording &amp; export</h2>
+<p>The simulator runs entirely inside the diagnostic's own build tree
+(<code>vrmc_sim</code> next to <code>vr_mc_diagnostic</code>), so this workflow works
+straight out of the box — no need to compile or run anything from
+<code>vr-mc-sdk</code> separately.</p>
+<p>To stop:</p>
 <ul>
-  <li><strong>Record telemetry</strong> (<code>Ctrl+Shift+R</code>) — toggled from the Data menu or toolbar. Currently a placeholder that writes to the log; CSV-per-snapshot is the planned evolution.</li>
-  <li><strong>Export telemetry CSV…</strong> — dumps the currently buffered chart data (what the Telemetry pane has accumulated) to a timestamped CSV.</li>
-  <li><strong>Clear charts</strong> — empties the scope buffer.</li>
+<li><strong>Help → Stop demo</strong> — terminates the sim processes cleanly.</li>
+<li>Pressing the toolbar <strong>Disconnect</strong> also stops the demo (Help
+  menu state flips back to "Start demo" enabled).</li>
+<li>Closing the diagnostic kills any surviving sim child processes
+  so nothing is left listening on the multicast group.</li>
 </ul>
-
-<h2>12. Emergency stop</h2>
-<p>The large red <strong>E-STOP</strong> button is pinned to the right of the toolbar and is always clickable. Shortcut <code>Space</code> is application-wide — it fires even when a setpoint spin box or name field has focus. On click:</p>
+<h3 id="trying-the-control-tab-against-the-demo">Trying the Control tab against the demo</h3>
+<p>Once auto-connect lands, the first slave is selected and you can
+drive it straight away:</p>
 <ol>
-  <li>Any running signal generator is stopped.</li>
-  <li><code>master_mgr_disable_all</code> walks every slave into <em>Switch-On Disabled</em> (via controlword 0x00).</li>
-  <li>The log records "E-STOP: disabled N slave(s)".</li>
+<li>Click <strong>Bringup</strong> in the Control tab — the state readout strip
+   walks <code>SWITCH_ON_DISABLED → READY_TO_SWITCH_ON → SWITCHED_ON →
+   OPERATION_ENABLED</code> (badge turns green).</li>
+<li>Type a value into the Setpoint spinbox (default unit = rad in
+   Position mode) and click <strong>Send</strong> — the MotorView needle swings
+   to the new angle. Try the preset buttons <code>+π/4</code> / <code>−π/4</code> /
+   <code>Home</code> for one-click setpoints.</li>
+<li>Tick <code>[deg]</code> in the readout strip to switch the spinbox + slider</li>
+<li>tracking-error display to degrees.</li>
+<li>Move the slider with <strong>stream live</strong> checked to scrub the
+   setpoint in real time.</li>
+<li><strong>E-STOP</strong> (toolbar, far right) — instantly disarms every slave
+   and pops the panel buttons back to disabled.</li>
 </ol>
-<p>Re-enabling a slave after E-STOP is just the normal Bringup → Enable sequence on the Control tab.</p>
-
-<h2>13. Keyboard shortcuts</h2>
+<p>If anything in this sequence fails, look at the Log dock at the
+bottom: every SDO error, PDO online event, and demo-process
+lifecycle line lands there with a timestamp.</p>
+<hr>
+<h2 id="2-connecting-to-drives">2. Connecting to drives</h2>
+<p><strong>Connection → Connect…</strong> (<code>Ctrl+K</code>).</p>
 <table>
-  <thead><tr><th>Combo</th><th>Action</th></tr></thead>
-  <tbody>
-    <tr><td><code>Ctrl+K</code></td><td>Connect…</td></tr>
-    <tr><td><code>Ctrl+R</code></td><td>Reconnect (replay last config)</td></tr>
-    <tr><td><code>Ctrl+E</code></td><td>Edit motor profile</td></tr>
-    <tr><td><code>Ctrl+Shift+C</code></td><td>Configure Drive…</td></tr>
-    <tr><td><code>Ctrl+Shift+R</code></td><td>Toggle telemetry recording</td></tr>
-    <tr><td><code>Ctrl+O</code></td><td>Open profile…</td></tr>
-    <tr><td><code>Ctrl+S</code></td><td>Save profile</td></tr>
-    <tr><td><code>Space</code></td><td>E-STOP (application-wide)</td></tr>
-    <tr><td><code>F1</code></td><td>Documentation</td></tr>
-  </tbody>
+<thead>
+<tr>
+<th>Transport</th>
+<th>Fields</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>UDP multicast</td>
+<td>Group, Port</td>
+<td>Loopback against sim, multi-host bench</td>
+</tr>
+<tr>
+<td>ZLG USB-CANFD</td>
+<td>Channel, bitrate, FD-bitrate</td>
+<td>Real drives</td>
+</tr>
+</tbody>
 </table>
-
-<h2>14. Troubleshooting</h2>
+<p>Both take <strong>First node id</strong> + <strong>Count</strong>. The diagnostic registers that
+range sequentially into <code>master_mgr</code>.</p>
+<p><strong>Reconnect</strong> (<code>Ctrl+R</code>) replays the last config. <strong>Disconnect</strong> is
+idempotent — worker thread survives for the next connect.</p>
+<hr>
+<h2 id="3-main-window-tour">3. Main window tour</h2>
+<p><img alt="Annotated layout" src="images/window_layout.svg"></p>
+<p><img alt="Main window connected" src="images/main_window.png"></p>
+<p>Toolbar groups (L→R): File · Connection · View (dock toggles) · Drive ·
+Data · Help · E-STOP (always right-anchored, <code>Space</code> shortcut).</p>
+<p>Slave table = one row per slave. Selection drives every per-slave
+panel.</p>
+<hr>
+<h2 id="4-left-tab-panels">4. Left-tab panels</h2>
+<h3 id="control">Control</h3>
+<p>Drives the CiA 402 state machine:</p>
+<p><img alt="CiA 402 states" src="images/cia402_states.svg"></p>
+<ul>
+<li><strong>Bringup</strong> — Not Ready → Switched On</li>
+<li><strong>Enable</strong> — → Operation Enabled (only motion-accepting state)</li>
+<li><strong>Disable</strong> — back to Switched On (torque off)</li>
+<li><strong>Fault reset</strong> — pulses CW bit 7 → Switch On Disabled</li>
+</ul>
+<p><strong>Mode</strong> selector + <strong>Setpoint</strong> spin box route through <code>master_mgr_set_target_one</code>.</p>
+<h3 id="gains">Gains</h3>
+<p><img alt="Gains tab" src="images/gains.png"></p>
+<p>Per-loop (current / velocity / position) Kp+Ki. Read pulls current
+values via SDO; Write pushes back.</p>
+<h3 id="signal-generator">Signal generator</h3>
+<p><img alt="Signal gen tab" src="images/signal_gen.png"></p>
+<p>Waveforms: constant · step · ramp · sine · chirp. Chirp feeds the Bode
+sweep.</p>
+<hr>
+<h2 id="5-detachable-panes">5. Detachable panes</h2>
+<p>Created hidden + floating. Toolbar View group brings them out.</p>
+<h3 id="profile">Profile</h3>
+<p><img alt="Profile dock" src="images/profile.png"></p>
+<p>Read-only 15-row <code>MotorParams</code> table (type, pole pairs, Rs, Ls_d, Ls_q,
+rated flux, inertia, voltage/current limits). <strong>Edit…</strong> opens a modal;
+File → Save Profile persists to JSON.</p>
+<h3 id="tuning">Tuning</h3>
+<p><img alt="Tuning dock" src="images/tuning.png"></p>
+<ul>
+<li><strong>Step</strong> — target, step size, offset, duration → run → overshoot, rise time, SS error</li>
+<li><strong>Bode</strong> — log-sweep chirp + Goertzel correlation → magnitude/phase vs. frequency</li>
+</ul>
+<h3 id="pdo-map">PDO map</h3>
+<p><img alt="PDO map dock" src="images/pdo_map.png"></p>
+<p>Two sections (TPDO1 / RPDO1). Offset, OD index, sub, bits, name, live
+value. <strong>Edit…</strong> runs the CiA 301 §7.2.2.2 remap dance via SDO.</p>
+<hr>
+<h2 id="6-configure-drive">6. Configure Drive</h2>
+<p><strong>Drive → Configure Drive…</strong> (<code>Ctrl+Shift+C</code>).</p>
+<p><img alt="Configure Drive dialog" src="images/drive_config.png"></p>
+<p>Modeless tabbed dialog. Opens with the selected slave, kicks off a
+batch SDO read so the form reflects the drive.</p>
+<h3 id="61-homing">6.1 Homing</h3>
 <table>
-  <thead><tr><th>Symptom</th><th>Likely cause</th><th>Check</th></tr></thead>
-  <tbody>
-    <tr>
-      <td>Configure Drive: "all fields aborted"</td>
-      <td>Drive doesn't expose the CiA 402 config objects (simulator, minimal drives).</td>
-      <td>Use a real drive, or leave the dialog for display only.</td>
-    </tr>
-    <tr>
-      <td><code>CO_FD_USDO_CLIENT: Session timeout</code></td>
-      <td>Drive not responding. Wrong node id, bus down, transport mis-selected, or PDO callback eating SDO frames.</td>
-      <td>Verify node id, transport; check the two UDP sockets came up.</td>
-    </tr>
-    <tr>
-      <td>PDO map Value column stays <code>—</code></td>
-      <td>No TPDO received — drive not emitting, COB-ID mismatch, or TPDO not enabled.</td>
-      <td>Log should show "PDO online" once per slave; if not, sniff the bus.</td>
-    </tr>
-    <tr>
-      <td>E-STOP disabled</td>
-      <td>Not connected yet — no slaves to disable.</td>
-      <td>Connect first; it lights up automatically.</td>
-    </tr>
-    <tr>
-      <td>Start Homing does nothing visible</td>
-      <td>Drive not in Operation Enabled before bit 4 pulse.</td>
-      <td>Hit <strong>Enable</strong> on Control first.</td>
-    </tr>
-    <tr>
-      <td>Floating dock disappeared</td>
-      <td>Window moved off-screen.</td>
-      <td>Toggle it from the toolbar / View menu to re-show.</td>
-    </tr>
-  </tbody>
+<thead>
+<tr>
+<th>Field</th>
+<th>OD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Method</td>
+<td><code>0x6098</code></td>
+</tr>
+<tr>
+<td>Home offset</td>
+<td><code>0x607C</code></td>
+</tr>
+<tr>
+<td>Switch search speed</td>
+<td><code>0x6099:1</code></td>
+</tr>
+<tr>
+<td>Zero search speed</td>
+<td><code>0x6099:2</code></td>
+</tr>
+<tr>
+<td>Homing acceleration</td>
+<td><code>0x609A</code></td>
+</tr>
+</tbody>
 </table>
-
-<h2>Appendix A — Transports in detail</h2>
-
-<h3>A.1 UDP multicast (<code>hal_can_udp</code>)</h3>
-<p>
-  The diagnostic opens two sockets per connection: one for SDO traffic,
-  one for PDO. Both bind <code>0.0.0.0:23400</code> on the loopback
-  interface with <code>SO_REUSEADDR</code> so they coexist in the same
-  process. Each socket joins the <code>239.192.0.42</code> multicast
-  group; <code>IP_MULTICAST_LOOP</code> stays on so other local sockets
-  see our sends. Every frame rides a 12-byte header:
-</p>
-<pre>[ sender_tag : 4 ][ cob_id : 4 ][ dlc : 1 ][ flags : 1 ][ rsvd : 2 ]</pre>
-<p>The sender tag filters self-echoes — each socket generates a random tag at create time.</p>
-
-<h3>A.2 ZLG USB-CANFD (<code>hal_can_zlg</code>)</h3>
-<p>
-  <code>libcontrolcanfd.so</code> is opened via <code>dlopen()</code> at
-  runtime; the shared object ships in
-  <code>src/backends/zlg/lib/</code> and is found through the RPATH.
-  One endpoint per channel; PDO is not yet wired on this transport
-  (V1 is SDO-only).
-</p>
-
-<h2>Appendix B — CiA 402 OD quick reference</h2>
-<p>Objects the diagnostic reads or writes:</p>
+<p><strong>Start Homing</strong> — mode=6, controlword <code>0x000F → 0x001F</code>:</p>
+<p><img alt="Start Homing sequence" src="images/homing_sequence.svg"></p>
+<p><strong>Zero encoder here</strong> — reads <code>0x6064</code>, writes <code>0x607C</code>, updates form.</p>
+<h3 id="62-motion-profile">6.2 Motion profile</h3>
+<p>Profile velocity <code>0x6081</code>, accel <code>0x6083</code>, decel <code>0x6084</code>, quickstop
+decel <code>0x6085</code>.</p>
+<h3 id="63-protection">6.3 Protection</h3>
+<p>Following error <code>0x6065</code> + timeout <code>0x6066</code>, pos limits <code>0x607D:1,2</code>,
+max speed <code>0x6080</code>, max torque <code>0x6072</code>. <strong>Zero torque here</strong> reads
+<code>0x6077</code>, writes <code>0x60B2</code>.</p>
+<h3 id="64-encoder">6.4 Encoder</h3>
+<p>Resolution <code>0x608F:1</code>, gear ratio <code>0x6091:1,2</code>, feed constant
+<code>0x6092:1,2</code>.</p>
+<h3 id="buttons">Buttons</h3>
+<ul>
+<li><strong>Read from drive</strong> — batch SDO upload; missing fields reported, not aborted</li>
+<li><strong>Apply</strong> — batch SDO download</li>
+<li><strong>OK</strong> — Apply + close · <strong>Cancel</strong> — discard</li>
+</ul>
+<hr>
+<h2 id="7-commissioning-workflow">7. Commissioning workflow</h2>
+<p><img alt="Commissioning flow" src="images/commissioning_flow.svg"></p>
+<ol>
+<li><strong>Connect</strong> — Ctrl+K → transport → node range.</li>
+<li><strong>Bring up</strong> — Control tab → Bringup → Enable.</li>
+<li><strong>Configure</strong> — Drive → Configure → Read → set limits → Apply.</li>
+<li><strong>Home</strong> — Start Homing (method-driven) or Zero encoder here.</li>
+<li><strong>Tune</strong> — Gains Read → Tuning step/Bode → iterate Kp/Ki.</li>
+<li><strong>Save</strong> — File → Save Profile + Drive → Save to Flash (planned).</li>
+</ol>
+<blockquote>
+<p><strong>Safety.</strong> Keep <code>Space</code> reachable the first time you enable a new
+drive. Wrong limits + wrong mode = motion outside the safe envelope
+in one control cycle.</p>
+</blockquote>
+<hr>
+<h2 id="8-tuning-workflows">8. Tuning workflows</h2>
+<h3 id="step-response">Step response</h3>
+<ol>
+<li>Drive Operation Enabled + correct mode.</li>
+<li>Tuning dock → Step sub-tab → set params → <strong>Run step</strong>.</li>
+<li>Read overshoot %, 10–90 % rise, SS error.</li>
+<li>Iterate: bump Kp until overshoot, back off 20 %, add Ki.</li>
+</ol>
+<h3 id="bode-sweep">Bode sweep</h3>
+<ol>
+<li>Tuning dock → Bode → freq start/end + duration.</li>
+<li><strong>Run sweep</strong> → chirp fires → Goertzel extracts I/Q per frequency.</li>
+<li>Read −3 dB crossover + phase margin.</li>
+</ol>
+<hr>
+<h2 id="9-pdo-mapping-read-edit-apply">9. PDO mapping — read, edit, apply</h2>
+<p><img alt="Transport paths" src="images/transport_paths.svg"></p>
+<p>Two <code>hal_can</code> endpoints per connection — one SDO, one PDO — because
+<code>hal_can_set_cb</code> is single-consumer.</p>
+<p>Edit flow: PDO map dock → <strong>Edit…</strong> → add/remove from CiA 402 catalog
+→ OK. Under the hood:</p>
+<p><img alt="PDO remap dance" src="images/pdo_remap.svg"></p>
+<p>Against the simulator every step SDO-aborts (<code>0x06020000</code>) because the
+sim doesn't expose <code>0x1600</code>/<code>0x1A00</code>. Against real drives the sequence
+completes and the TPDO layout changes take effect on next emission.</p>
+<hr>
+<h2 id="10-telemetry-recording-export">10. Telemetry recording &amp; export</h2>
+<ul>
+<li><strong>Record telemetry</strong> (<code>Ctrl+Shift+R</code>) — toggle; currently a placeholder (CSV-per-snapshot planned).</li>
+<li><strong>Export telemetry CSV…</strong> — dumps buffered chart data.</li>
+<li><strong>Clear charts</strong> — empty the scope.</li>
+</ul>
+<hr>
+<h2 id="11-emergency-stop">11. Emergency stop</h2>
+<p>Red button, toolbar right edge. <code>Space</code> app-wide. On click: stop
+generator → <code>master_mgr_disable_all</code> → every slave → Switch On
+Disabled. Re-enable via normal Control tab Bringup + Enable.</p>
+<hr>
+<h2 id="12-keyboard-shortcuts">12. Keyboard shortcuts</h2>
 <table>
-  <thead><tr><th>Index</th><th>Sub</th><th>Field</th><th>Where</th></tr></thead>
-  <tbody>
-    <tr><td><code>0x1010</code></td><td>1</td><td>Store parameters</td><td>Drive · Save to Flash (planned)</td></tr>
-    <tr><td><code>0x1011</code></td><td>1</td><td>Restore defaults</td><td>Drive · Load from Flash (planned)</td></tr>
-    <tr><td><code>0x1400+n</code></td><td>1</td><td>RPDO comm — COB-ID</td><td>PDO remap · disable bit</td></tr>
-    <tr><td><code>0x1600+n</code></td><td>0..N</td><td>RPDO mapping</td><td>PDO mapping editor</td></tr>
-    <tr><td><code>0x1800+n</code></td><td>1</td><td>TPDO comm — COB-ID</td><td>PDO remap · disable bit</td></tr>
-    <tr><td><code>0x1A00+n</code></td><td>0..N</td><td>TPDO mapping</td><td>PDO mapping editor</td></tr>
-    <tr><td><code>0x603F</code></td><td>0</td><td>Error code</td><td>TPDO1 · PDO map</td></tr>
-    <tr><td><code>0x6040</code></td><td>0</td><td>Controlword</td><td>Control tab · Homing</td></tr>
-    <tr><td><code>0x6041</code></td><td>0</td><td>Statusword</td><td>TPDO1 · decoded in banners</td></tr>
-    <tr><td><code>0x6060</code></td><td>0</td><td>Mode of operation</td><td>Control tab · Homing</td></tr>
-    <tr><td><code>0x6064</code></td><td>0</td><td>Position actual</td><td>TPDO1 · Zero encoder here</td></tr>
-    <tr><td><code>0x6065</code></td><td>0</td><td>Max following error</td><td>Configure Drive · Protection</td></tr>
-    <tr><td><code>0x6066</code></td><td>0</td><td>Following error timeout</td><td>Configure Drive · Protection</td></tr>
-    <tr><td><code>0x606C</code></td><td>0</td><td>Velocity actual</td><td>TPDO1</td></tr>
-    <tr><td><code>0x6072</code></td><td>0</td><td>Max torque</td><td>Configure Drive · Protection</td></tr>
-    <tr><td><code>0x6077</code></td><td>0</td><td>Torque actual</td><td>TPDO1 · Zero torque here</td></tr>
-    <tr><td><code>0x607A</code></td><td>0</td><td>Target position</td><td>RPDO1</td></tr>
-    <tr><td><code>0x607C</code></td><td>0</td><td>Home offset</td><td>Homing tab · Zero encoder</td></tr>
-    <tr><td><code>0x607D</code></td><td>1,2</td><td>Position limits</td><td>Protection</td></tr>
-    <tr><td><code>0x6080</code></td><td>0</td><td>Max motor speed</td><td>Protection</td></tr>
-    <tr><td><code>0x6081</code></td><td>0</td><td>Profile velocity</td><td>Motion profile</td></tr>
-    <tr><td><code>0x6083</code></td><td>0</td><td>Profile acceleration</td><td>Motion profile</td></tr>
-    <tr><td><code>0x6084</code></td><td>0</td><td>Profile deceleration</td><td>Motion profile</td></tr>
-    <tr><td><code>0x6085</code></td><td>0</td><td>Quickstop deceleration</td><td>Motion profile</td></tr>
-    <tr><td><code>0x608F</code></td><td>1</td><td>Encoder resolution</td><td>Encoder</td></tr>
-    <tr><td><code>0x6091</code></td><td>1,2</td><td>Gear ratio</td><td>Encoder</td></tr>
-    <tr><td><code>0x6092</code></td><td>1,2</td><td>Feed constant</td><td>Encoder</td></tr>
-    <tr><td><code>0x6098</code></td><td>0</td><td>Homing method</td><td>Homing tab</td></tr>
-    <tr><td><code>0x6099</code></td><td>1,2</td><td>Homing speeds</td><td>Homing tab</td></tr>
-    <tr><td><code>0x609A</code></td><td>0</td><td>Homing acceleration</td><td>Homing tab</td></tr>
-    <tr><td><code>0x60B2</code></td><td>0</td><td>Torque offset</td><td>Zero torque here</td></tr>
-    <tr><td><code>0x60FF</code></td><td>0</td><td>Target velocity</td><td>RPDO1</td></tr>
-  </tbody>
+<thead>
+<tr>
+<th>Combo</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ctrl+K</code></td>
+<td>Connect…</td>
+</tr>
+<tr>
+<td><code>Ctrl+R</code></td>
+<td>Reconnect</td>
+</tr>
+<tr>
+<td><code>Ctrl+E</code></td>
+<td>Edit motor profile</td>
+</tr>
+<tr>
+<td><code>Ctrl+Shift+C</code></td>
+<td>Configure Drive…</td>
+</tr>
+<tr>
+<td><code>Ctrl+Shift+R</code></td>
+<td>Toggle recording</td>
+</tr>
+<tr>
+<td><code>Ctrl+O</code> / <code>Ctrl+S</code></td>
+<td>Open / Save profile</td>
+</tr>
+<tr>
+<td><code>Space</code></td>
+<td>E-STOP</td>
+</tr>
+<tr>
+<td><code>F1</code></td>
+<td>Documentation</td>
+</tr>
+</tbody>
 </table>
-
-<h2>Appendix C — Command-line flags</h2>
+<hr>
+<h2 id="13-troubleshooting">13. Troubleshooting</h2>
 <table>
-  <thead><tr><th>Flag</th><th>Value</th><th>Purpose</th></tr></thead>
-  <tbody>
-    <tr><td><code>-a</code>, <code>--auto-connect</code></td><td>—</td><td>Connect with default config on startup.</td></tr>
-    <tr><td><code>--quit-after</code></td><td>ms</td><td>Quit after N ms (headless smoke tests).</td></tr>
-    <tr><td><code>--screenshot</code></td><td>path[:ms]</td><td>Grab the window to PNG after a delay.</td></tr>
-    <tr><td><code>--show-panel</code></td><td>name</td><td>Open a dock / dialog (<code>pdo-map</code>, <code>tuning</code>, <code>profile</code>, <code>drive-config</code>).</td></tr>
-    <tr><td><code>--show-tab</code></td><td>idx</td><td>Select a left-tab (0 Control, 1 Gains, 2 Signal gen).</td></tr>
-    <tr><td><code>--only-dialog</code></td><td>—</td><td>With <code>--screenshot</code>: capture only the topmost dialog.</td></tr>
-  </tbody>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Configure Drive: "all fields aborted"</td>
+<td>Drive doesn't expose these OD objects</td>
+<td>Use a real drive</td>
+</tr>
+<tr>
+<td><code>Session timeout</code></td>
+<td>Drive not responding / wrong id / bus down</td>
+<td>Verify id + transport</td>
+</tr>
+<tr>
+<td>PDO Value column stays <code>—</code></td>
+<td>No TPDO — not emitting or COB-ID mismatch</td>
+<td>Log "PDO online" line should appear</td>
+</tr>
+<tr>
+<td>E-STOP disabled</td>
+<td>Not connected</td>
+<td>Connect first</td>
+</tr>
+<tr>
+<td>Start Homing no effect</td>
+<td>Drive not Operation Enabled</td>
+<td>Enable on Control first</td>
+</tr>
+<tr>
+<td>Floating dock off-screen</td>
+<td>Window moved</td>
+<td>Toggle from toolbar/View menu</td>
+</tr>
+</tbody>
 </table>
-
-<footer>
-  VinRobotic · VR Motor Control Diagnostic Tool · user guide v1.0 · built against Qt 6
-</footer>
+<hr>
+<h2 id="appendix-a-transports">Appendix A — Transports</h2>
+<h3 id="udp-multicast-hal_can_udp">UDP multicast (<code>hal_can_udp</code>)</h3>
+<p>Two sockets per connection; both bound <code>0.0.0.0:23400</code> with
+<code>SO_REUSEADDR</code>. Joined <code>239.192.0.42</code>, <code>IP_MULTICAST_LOOP=1</code>. 12-byte
+header <code>[tag·4][cob_id·4][dlc·1][flags·1][rsvd·2]</code>; tag filters self-echoes.</p>
+<h3 id="zlg-usb-canfd-hal_can_zlg">ZLG USB-CANFD (<code>hal_can_zlg</code>)</h3>
+<p><code>libcontrolcanfd.so</code> via <code>dlopen()</code> at runtime; ships in
+<code>src/backends/zlg/lib/</code> (RPATH-wired). One endpoint per channel; PDO
+not yet plumbed (V1 is SDO-only).</p>
+<hr>
+<h2 id="appendix-b-cia-402-od-quick-reference">Appendix B — CiA 402 OD quick reference</h2>
+<table>
+<thead>
+<tr>
+<th>Index</th>
+<th>Sub</th>
+<th>Field</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x1010</code></td>
+<td>1</td>
+<td>Store parameters</td>
+<td>Save to Flash (planned)</td>
+</tr>
+<tr>
+<td><code>0x1011</code></td>
+<td>1</td>
+<td>Restore defaults</td>
+<td>Load from Flash (planned)</td>
+</tr>
+<tr>
+<td><code>0x1400+n</code></td>
+<td>1</td>
+<td>RPDO COB-ID</td>
+<td>PDO remap</td>
+</tr>
+<tr>
+<td><code>0x1600+n</code></td>
+<td>0..N</td>
+<td>RPDO mapping</td>
+<td>PDO mapping editor</td>
+</tr>
+<tr>
+<td><code>0x1800+n</code></td>
+<td>1</td>
+<td>TPDO COB-ID</td>
+<td>PDO remap</td>
+</tr>
+<tr>
+<td><code>0x1A00+n</code></td>
+<td>0..N</td>
+<td>TPDO mapping</td>
+<td>PDO mapping editor</td>
+</tr>
+<tr>
+<td><code>0x603F</code></td>
+<td>0</td>
+<td>Error code</td>
+<td>TPDO1</td>
+</tr>
+<tr>
+<td><code>0x6040</code></td>
+<td>0</td>
+<td>Controlword</td>
+<td>Control · Homing</td>
+</tr>
+<tr>
+<td><code>0x6041</code></td>
+<td>0</td>
+<td>Statusword</td>
+<td>TPDO1 · banners</td>
+</tr>
+<tr>
+<td><code>0x6060</code></td>
+<td>0</td>
+<td>Mode of operation</td>
+<td>Control · Homing</td>
+</tr>
+<tr>
+<td><code>0x6064</code></td>
+<td>0</td>
+<td>Position actual</td>
+<td>TPDO1 · Zero encoder</td>
+</tr>
+<tr>
+<td><code>0x6065</code></td>
+<td>0</td>
+<td>Max following error</td>
+<td>Protection</td>
+</tr>
+<tr>
+<td><code>0x6066</code></td>
+<td>0</td>
+<td>Following error timeout</td>
+<td>Protection</td>
+</tr>
+<tr>
+<td><code>0x606C</code></td>
+<td>0</td>
+<td>Velocity actual</td>
+<td>TPDO1</td>
+</tr>
+<tr>
+<td><code>0x6072</code></td>
+<td>0</td>
+<td>Max torque</td>
+<td>Protection</td>
+</tr>
+<tr>
+<td><code>0x6077</code></td>
+<td>0</td>
+<td>Torque actual</td>
+<td>TPDO1 · Zero torque</td>
+</tr>
+<tr>
+<td><code>0x607A</code></td>
+<td>0</td>
+<td>Target position</td>
+<td>RPDO1</td>
+</tr>
+<tr>
+<td><code>0x607C</code></td>
+<td>0</td>
+<td>Home offset</td>
+<td>Zero encoder here</td>
+</tr>
+<tr>
+<td><code>0x607D</code></td>
+<td>1,2</td>
+<td>Position limits</td>
+<td>Protection</td>
+</tr>
+<tr>
+<td><code>0x6080</code></td>
+<td>0</td>
+<td>Max motor speed</td>
+<td>Protection</td>
+</tr>
+<tr>
+<td><code>0x6081</code></td>
+<td>0</td>
+<td>Profile velocity</td>
+<td>Motion</td>
+</tr>
+<tr>
+<td><code>0x6083</code></td>
+<td>0</td>
+<td>Profile acceleration</td>
+<td>Motion</td>
+</tr>
+<tr>
+<td><code>0x6084</code></td>
+<td>0</td>
+<td>Profile deceleration</td>
+<td>Motion</td>
+</tr>
+<tr>
+<td><code>0x6085</code></td>
+<td>0</td>
+<td>Quickstop deceleration</td>
+<td>Motion</td>
+</tr>
+<tr>
+<td><code>0x608F</code></td>
+<td>1</td>
+<td>Encoder resolution</td>
+<td>Encoder</td>
+</tr>
+<tr>
+<td><code>0x6091</code></td>
+<td>1,2</td>
+<td>Gear ratio</td>
+<td>Encoder</td>
+</tr>
+<tr>
+<td><code>0x6092</code></td>
+<td>1,2</td>
+<td>Feed constant</td>
+<td>Encoder</td>
+</tr>
+<tr>
+<td><code>0x6098</code></td>
+<td>0</td>
+<td>Homing method</td>
+<td>Homing</td>
+</tr>
+<tr>
+<td><code>0x6099</code></td>
+<td>1,2</td>
+<td>Homing speeds</td>
+<td>Homing</td>
+</tr>
+<tr>
+<td><code>0x609A</code></td>
+<td>0</td>
+<td>Homing acceleration</td>
+<td>Homing</td>
+</tr>
+<tr>
+<td><code>0x60B2</code></td>
+<td>0</td>
+<td>Torque offset</td>
+<td>Zero torque here</td>
+</tr>
+<tr>
+<td><code>0x60FF</code></td>
+<td>0</td>
+<td>Target velocity</td>
+<td>RPDO1</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="appendix-c-command-line-flags">Appendix C — Command-line flags</h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Value</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-a</code>, <code>--auto-connect</code></td>
+<td>—</td>
+<td>Connect with defaults on startup</td>
+</tr>
+<tr>
+<td><code>--quit-after</code></td>
+<td>ms</td>
+<td>Quit after N ms (smoke tests)</td>
+</tr>
+<tr>
+<td><code>--screenshot</code></td>
+<td>path[:ms]</td>
+<td>Grab window → PNG after delay</td>
+</tr>
+<tr>
+<td><code>--show-panel</code></td>
+<td>name</td>
+<td>Open dock/dialog: <code>pdo-map</code>/<code>tuning</code>/<code>profile</code>/<code>drive-config</code></td>
+</tr>
+<tr>
+<td><code>--show-tab</code></td>
+<td>idx</td>
+<td>Select left-tab (0/1/2)</td>
+</tr>
+<tr>
+<td><code>--only-dialog</code></td>
+<td>—</td>
+<td>With <code>--screenshot</code>: capture only the top dialog</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<p><em>Built against Qt 6 · powered by vr-mc-sdk · VinRobotic</em></p>
 
 </body>
 </html>

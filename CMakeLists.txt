@@ -44,31 +44,11 @@ set(BUILD_DYNAMIXEL OFF CACHE BOOL "" FORCE)   # SDK adapter unused now
 
 add_subdirectory(${VR_MC_SDK_DIR} ${CMAKE_BINARY_DIR}/_vr_mc_sdk EXCLUDE_FROM_ALL)
 
-# ---- ZLG CAN driver (in-tree, similar shape to hal_can_udp) -------------
-# Vendor sources copied into src/backends/zlg/ so the diagnostic doesn't
-# depend on vr-hand-sdk or any external SDK. The native runtime
-# (libcontrolcanfd.so) ships in src/backends/zlg/lib/ and is dlopen'd by
-# ZlgCanDrv at startup; the executable RPATH points there so it Just Works.
-add_library(zlg_can STATIC
-    src/backends/zlg/zlg_can_drv.cpp
-    src/backends/zlg/zlg_can_drv.hpp
-    src/backends/zlg/can_drv.hpp
-    src/backends/zlg/controlcanfd.h
-    src/backends/zlg/config.h
-    src/backends/zlg/timer.h
-    src/backends/zlg/logger.hpp
-    src/backends/zlg/hal_can_zlg.cpp
-    src/backends/zlg/hal_can_zlg.hpp
-)
-target_include_directories(zlg_can PUBLIC
-    src/backends/zlg
-    ${VR_MC_SDK_DIR}/src/platform/hal
-    ${VR_MC_SDK_DIR}/src/mc/libraries/utilities/types/include)
-target_link_libraries(zlg_can PUBLIC dl pthread)
-set_target_properties(zlg_can PROPERTIES
-    BUILD_RPATH   "${CMAKE_CURRENT_SOURCE_DIR}/src/backends/zlg/lib"
-    INSTALL_RPATH "$ORIGIN/zlg/lib")
-
+# ZLG CAN driver comes from vr-mc-sdk via the platform_linux target
+# (linked further down). The diagnostic no longer carries its own fork
+# of the ZLG sources — the SDK version supports multi-endpoint sharing
+# on a single channel, which the in-tree fork did not, and which is
+# required for the PDO + USDO server to co-exist on real ZLG hardware.
 # ---- Executable ---------------------------------------------------------
 add_executable(vr_mc_diagnostic
     src/main.cpp
@@ -84,6 +64,10 @@ add_executable(vr_mc_diagnostic
     src/MotorProfileEditor.hpp
     src/MotorProfileView.cpp
     src/MotorProfileView.hpp
+    src/MotorView.cpp
+    src/MotorView.hpp
+    src/SlavePickerBar.cpp
+    src/SlavePickerBar.hpp
     src/PdoMappingView.cpp
     src/PdoMappingView.hpp
     src/PdoMappingEditor.cpp
@@ -123,7 +107,6 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Charts
-    zlg_can
     master_mgr
     motor_drive_cia402_intf
     cia402_master
@@ -139,3 +122,27 @@ set_target_properties(vr_mc_diagnostic PROPERTIES
     INSTALL_RPATH "$ORIGIN/zlg/lib")
 
 install(TARGETS vr_mc_diagnostic RUNTIME DESTINATION bin)
+
+# ---- vrmc_sim — in-tree CiA 402 simulator for Help → Start demo ---------
+#
+# Independent of vr-mc-sdk's compiled cia402_drive_sim binary: the
+# diagnostic ships its own simulator built from sources under tools/.
+# Still links the SDK's slave-side libs (tinysh, can_stack, cia402,
+# platform_linux) which the add_subdirectory above already exposes,
+# but the resulting executable lives in the diagnostic build tree so
+# operators don't need the SDK binary to run the demo.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(vrmc_sim
+        tools/vrmc_sim.c
+        tools/vrmc_sim_od.c
+        tools/vrmc_sim_od.h
+    )
+    target_compile_definitions(vrmc_sim PRIVATE USE_LINUX_CAN=1)
+    target_link_libraries(vrmc_sim PRIVATE
+        tinysh
+        can_stack
+        cia402
+        platform_linux
+    )
+    install(TARGETS vrmc_sim RUNTIME DESTINATION bin)
+endif()

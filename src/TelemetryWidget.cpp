@@ -4,8 +4,10 @@
 #include <QChart>
 #include <QChartView>
 #include <QElapsedTimer>
-#include <QGridLayout>
+#include <QFrame>
+#include <QGroupBox>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineSeries>
 #include <QPen>
 #include <QValueAxis>
@@ -17,29 +19,31 @@ namespace vrmc {
 
 TelemetryWidget::TelemetryWidget(QWidget* parent) : QWidget(parent)
 {
-    /* --- channel catalogue. Ordered by expected relevance. --- */
+    /* --- channel catalogue, tagged with a group so the checkbox row
+     * below can build labelled columns from a single source of truth. */
+    using G = Group;
     m_channels = {
-        { tr("pos (rad)"),   QColor("#4caf50"), true,
+        { G::Position,   tr("pos (rad)"),       QColor("#4caf50"), true,
           [](const SlaveSnapshot& s){ return s.position; },       nullptr, nullptr },
-        { tr("vel (rad/s)"), QColor("#2196f3"), true,
-          [](const SlaveSnapshot& s){ return s.velocity; },       nullptr, nullptr },
-        { tr("trq (Nm)"),    QColor("#f44336"), true,
-          [](const SlaveSnapshot& s){ return s.torque; },         nullptr, nullptr },
-        { tr("cmd pos"),     QColor("#8bc34a"), false,
+        { G::Position,   tr("cmd pos (rad)"),   QColor("#8bc34a"), false,
           [](const SlaveSnapshot& s){ return s.cmdPosition; },    nullptr, nullptr },
-        { tr("cmd vel"),     QColor("#03a9f4"), false,
+        { G::Velocity,   tr("vel (rad/s)"),     QColor("#2196f3"), true,
+          [](const SlaveSnapshot& s){ return s.velocity; },       nullptr, nullptr },
+        { G::Velocity,   tr("cmd vel (rad/s)"), QColor("#03a9f4"), false,
           [](const SlaveSnapshot& s){ return s.cmdVelocity; },    nullptr, nullptr },
-        { tr("cmd trq"),     QColor("#ff9800"), false,
+        { G::Torque,     tr("trq (Nm)"),        QColor("#f44336"), true,
+          [](const SlaveSnapshot& s){ return s.torque; },         nullptr, nullptr },
+        { G::Torque,     tr("cmd trq (Nm)"),    QColor("#ff9800"), false,
           [](const SlaveSnapshot& s){ return s.cmdTorque; },      nullptr, nullptr },
-        { tr("err"),         QColor("#e91e63"), false,
+        { G::Tracking,   tr("Δq"),              QColor("#e91e63"), false,
           [](const SlaveSnapshot& s){ return s.trackingError; },  nullptr, nullptr },
-        { tr("current (A)"), QColor("#9c27b0"), false,
+        { G::Electrical, tr("current (A)"),     QColor("#9c27b0"), false,
           [](const SlaveSnapshot& s){ return s.current; },        nullptr, nullptr },
-        { tr("temp (°C)"),   QColor("#795548"), false,
+        { G::Electrical, tr("temp (°C)"),       QColor("#795548"), false,
           [](const SlaveSnapshot& s){ return s.temperature; },    nullptr, nullptr },
     };
 
-    /* --- chart + axes --- */
+    /* --- single chart + axes (all channels share the same Y). --- */
     m_chart = new QChart;
     m_chart->setTitle(tr("Live telemetry"));
     m_chart->legend()->setAlignment(Qt::AlignBottom);
@@ -65,37 +69,91 @@ TelemetryWidget::TelemetryWidget(QWidget* parent) : QWidget(parent)
         c.series->setVisible(c.defaultOn);
     }
 
-    auto* view = new QChartView(m_chart, this);
+    auto* view = new QChartView(m_chart);
     view->setRenderHint(QPainter::Antialiasing, true);
+    /* Chart view itself has no frame — the boundary lives on the
+     * outer QFrame that wraps the checkbox header + chart together
+     * (see below). */
+    view->setFrameShape(QFrame::NoFrame);
 
-    /* --- checkbox grid --- */
-    auto* boxes = new QGridLayout;
-    boxes->setContentsMargins(8, 4, 8, 4);
-    boxes->setHorizontalSpacing(12);
-    int col = 0;
-    int row = 0;
-    const int cols = 5;
-    for (auto& c : m_channels){
-        c.check = new QCheckBox(c.name, this);
-        c.check->setChecked(c.defaultOn);
-        /* Splash of the channel colour on the label so it's easy to
-         * cross-reference with the chart. */
-        c.check->setStyleSheet(QStringLiteral("QCheckBox { color: %1; }")
-                                   .arg(c.colour.name()));
-        connect(c.check, &QCheckBox::toggled, this, [this, s = c.series](bool on){
-            s->setVisible(on);
-            rescale();
-        });
-        boxes->addWidget(c.check, row, col);
-        ++col;
-        if (col >= cols){ col = 0; ++row; }
+    /* --- checkbox row: one labelled column per group, separated by
+     * thin vertical dividers. Each group's checkboxes stack
+     * vertically so the row stays compact and the visual grouping is
+     * obvious without needing tabs or sub-charts. --- */
+    auto groupTitle = [](Group g) -> QString {
+        switch (g){
+        case Group::Position:   return QStringLiteral("Position");
+        case Group::Velocity:   return QStringLiteral("Velocity");
+        case Group::Torque:     return QStringLiteral("Torque");
+        case Group::Tracking:   return QStringLiteral("Tracking");
+        case Group::Electrical: return QStringLiteral("Electrical");
+        }
+        return {};
+    };
+
+    auto* boxesRow = new QHBoxLayout;
+    boxesRow->setContentsMargins(8, 4, 8, 4);
+    boxesRow->setSpacing(0);
+
+    const Group kOrder[] = { Group::Position, Group::Velocity, Group::Torque,
+                             Group::Tracking, Group::Electrical };
+    bool firstGroup = true;
+    for (Group g : kOrder){
+        if (!firstGroup){
+            auto* sep = new QFrame(this);
+            sep->setFrameShape(QFrame::VLine);
+            sep->setFrameShadow(QFrame::Sunken);
+            boxesRow->addWidget(sep);
+        }
+        firstGroup = false;
+
+        auto* col = new QVBoxLayout;
+        col->setContentsMargins(10, 0, 10, 0);
+        col->setSpacing(2);
+
+        auto* header = new QLabel(groupTitle(g), this);
+        QFont hf = header->font();
+        hf.setBold(true);
+        header->setFont(hf);
+        col->addWidget(header);
+
+        for (auto& c : m_channels){
+            if (c.group != g){ continue; }
+            c.check = new QCheckBox(c.name, this);
+            c.check->setChecked(c.defaultOn);
+            /* Splash of the channel colour on the label so it's easy to
+             * cross-reference with the chart. */
+            c.check->setStyleSheet(QStringLiteral("QCheckBox { color: %1; }")
+                                       .arg(c.colour.name()));
+            connect(c.check, &QCheckBox::toggled, this,
+                    [this, s = c.series](bool on){
+                        s->setVisible(on);
+                        rescale();
+                    });
+            col->addWidget(c.check);
+        }
+        col->addStretch(1);
+        boxesRow->addLayout(col);
     }
+    boxesRow->addStretch(1);
+
+    /* Wrap checkbox header + chart in a single QFrame so the
+     * boundary surrounds the whole pane (not just the chart view).
+     * This visually unifies the controls with the plot they affect. */
+    auto* frame = new QFrame(this);
+    frame->setFrameShape(QFrame::StyledPanel);
+    frame->setFrameShadow(QFrame::Sunken);
+    frame->setLineWidth(1);
+    auto* inner = new QVBoxLayout(frame);
+    inner->setContentsMargins(0, 0, 0, 0);
+    inner->setSpacing(0);
+    inner->addLayout(boxesRow);
+    inner->addWidget(view, 1);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
-    root->addLayout(boxes);
-    root->addWidget(view, 1);
+    root->addWidget(frame);
 
     m_t0 = new QElapsedTimer;
     m_t0->start();

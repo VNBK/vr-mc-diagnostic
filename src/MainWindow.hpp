@@ -14,9 +14,12 @@
 
 class QAction;
 class QDockWidget;
+class QFile;
 class QLabel;
+class QProcess;
 class QSplitter;
 class QTableView;
+class QTextStream;
 
 QT_FORWARD_DECLARE_CLASS(QTabWidget)
 
@@ -28,8 +31,10 @@ class GainEditor;
 class JointControlPanel;
 class LogDock;
 class MotorProfileView;
+class MotorView;
 class PdoMappingView;
 class SignalGeneratorPanel;
+class SlavePickerBar;
 class SlaveTableModel;
 class TelemetryWidget;
 class TuningPane;
@@ -86,9 +91,23 @@ private slots:
     void onExportTelemetry();
     void onClearCharts();
 
+    /** Append the current snapshot batch to the active recording file
+     *  (no-op when not recording). Called from onSnapshots. */
+    void recordSnapshots(const QVector<vrmc::SlaveSnapshot>& snaps);
+
     /* Help menu. */
     void onAbout();
     void onDocumentation();
+    /** Prompt for slave count, spawn N cia402_drive_sim processes
+     *  (one per node ID starting at the picker's first_id default),
+     *  then auto-connect. The spawned processes are tracked so
+     *  Stop demo (and app shutdown) can terminate them cleanly. */
+    void onStartDemo();
+    /** Kill every demo process and disconnect. No-op if none running. */
+    void onStopDemo();
+    /** Locate the cia402_drive_sim binary by walking up from the
+     *  diagnostic's own dir; returns an empty string if not found. */
+    QString findSimBinary() const;
 
 private:
     void buildUi();
@@ -101,8 +120,25 @@ private:
     QThread           m_workerThread;
     MasterWorker*     m_worker    = nullptr;
 
+    /* Telemetry recording state. m_recordFile is non-null while a
+     * recording is in progress; closed on toggle-off / disconnect. */
+    QFile*            m_recordFile   = nullptr;
+    QTextStream*      m_recordStream = nullptr;
+    qint64            m_recordRowCount = 0;
+    bool              m_recordHeaderWritten = false;
+
+    /* Demo state — every cia402_drive_sim subprocess we spawn from
+     * Help → Start demo lands here so onStopDemo / the destructor
+     * can terminate them cleanly. Empty means no demo running. */
+    QVector<QProcess*> m_demoProcs;
+    QAction*          m_demoStartAct = nullptr;
+    QAction*          m_demoStopAct  = nullptr;
+
     SlaveTableModel*      m_model       = nullptr;
     QTableView*           m_table       = nullptr;
+    QWidget*              m_tableHost   = nullptr;   /**< collapsible wrap around m_table */
+    SlavePickerBar*       m_picker      = nullptr;
+    MotorView*            m_motorView   = nullptr;
     QTabWidget*           m_leftTabs    = nullptr;
     MotorProfileView*     m_profileView = nullptr;
     PdoMappingView*       m_pdoMap      = nullptr;
@@ -114,10 +150,14 @@ private:
     LogDock*              m_log         = nullptr;
 
     /* Detachable panes promoted off the tab bar. Each is hidden by
-     * default and toggled from the toolbar / View menu. */
-    QDockWidget*          m_profileDock = nullptr;
-    QDockWidget*          m_tuningDock  = nullptr;
-    QDockWidget*          m_pdoMapDock  = nullptr;
+     * default and toggled from the toolbar / View menu. Motor
+     * profile is no longer a dock — it lives inline in the top
+     * split's right pane, and its toolbar / View-menu toggle shows
+     * or hides that pane (m_profileFrame). */
+    QDockWidget*          m_tuningDock   = nullptr;
+    QDockWidget*          m_pdoMapDock   = nullptr;
+    QWidget*              m_profileFrame = nullptr;
+    QAction*              m_profileAct   = nullptr;
 
     /* File menu actions. */
     QAction*          m_openProfileAct    = nullptr;

@@ -23,6 +23,9 @@ public:
         ColPosition,
         ColVelocity,
         ColTorque,
+        ColCurrent,      /**< A                                            */
+        ColTemperature,  /**< °C                                           */
+        ColError,        /**< CiA-402 error_code (0x603F), PDO-fresh only  */
         ColCount,
     };
 

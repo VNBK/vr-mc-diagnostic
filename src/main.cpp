@@ -123,20 +123,28 @@ int main(int argc, char** argv)
     QElapsedTimer splashTimer;
     splashTimer.start();
 
-    vrmc::MainWindow w;
+    vrmc::MainWindow w;     /* construct but do NOT show yet — splash
+                             * owns the screen until its timeout fires */
     splash.showMessage(QStringLiteral("Ready."),
                        Qt::AlignBottom | Qt::AlignHCenter,
                        QColor("#cfd8e3"));
     app.processEvents();
-    w.show();
 
-    /* Keep the splash visible for ~1200 ms total so it's a deliberate
-     * beat, not a flicker. finish() hides and raises the main window. */
+    /* Splash dwells for a minimum kMinSplashMs so it isn't a subliminal
+     * flash on machines where construction was fast. Only after the
+     * dwell elapses do we close() the splash AND show() the main window
+     * — the operator wanted "MainWindow only appears once the splash
+     * has gone", not "MainWindow comes up underneath and gets uncovered
+     * later". Subtract whatever time MainWindow construction already
+     * consumed so the timeout isn't doubled on slow boots. */
     constexpr qint64 kMinSplashMs = 1200;
     const qint64 elapsed = splashTimer.elapsed();
     const int    remain  = int(std::max<qint64>(0, kMinSplashMs - elapsed));
     QTimer::singleShot(remain, &splash, [&splash, &w]{
-        splash.finish(&w);
+        splash.close();
+        w.show();
+        w.raise();
+        w.activateWindow();
     });
 
     if (cli.isSet(autoConn)){

@@ -1,12 +1,18 @@
 /**
  * @file   TelemetryWidget.hpp
- * @brief  Live multi-channel chart with per-line show/hide checkboxes.
+ * @brief  Single-chart live telemetry with grouped show/hide checkboxes.
  *
- * Channels are declared at widget construction (see kChannels in the
- * .cpp). Each has a name, colour, default-visible flag, and a lambda
- * that extracts its value from a SlaveSnapshot. A QCheckBox row above
- * the chart toggles the matching QLineSeries' visibility; the Y-axis
- * autoscales across currently-visible channels.
+ * Every channel shares one QChart so the operator can correlate across
+ * units at a glance. Y-axis autoscales across the currently-visible
+ * series, so hiding a high-magnitude channel (e.g. temperature in °C)
+ * lets the small-magnitude ones (e.g. tracking error Δq) breathe.
+ *
+ * The checkbox row above the chart is organised into labelled column
+ * groups (Position / Velocity / Torque / Tracking / Electrical) so the
+ * operator can mentally cluster related signals without the chart
+ * having to fan out into multiple tabs or sub-charts.
+ *
+ * Channel catalogue lives in the .cpp; see kChannels.
  */
 
 #pragma once
@@ -39,12 +45,20 @@ public slots:
 private:
     static constexpr int kWindowSec = 10;
 
+    enum class Group {
+        Position = 0,
+        Velocity,
+        Torque,
+        Tracking,
+        Electrical,
+    };
+
     struct Channel {
+        Group                                                  group;
         QString                                                name;
         QColor                                                 colour;
         bool                                                   defaultOn;
         std::function<float(const SlaveSnapshot&)>             extract;
-        /* Filled at runtime. */
         QLineSeries*                                           series  = nullptr;
         QCheckBox*                                             check   = nullptr;
     };

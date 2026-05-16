@@ -95,13 +95,19 @@ struct DriveConfig
     uint32_t profile_decel      = 5000;
     uint32_t quickstop_decel    = 10000;
 
-    /* Protection (0x6065 / 0x6066 / 0x607D / 0x6080 / 0x6072). */
+    /* Protection (0x6065 / 0x6066 / 0x607D / 0x6080 / 0x6072 / 0x6076). */
     uint32_t following_error    = 5000;
     uint16_t following_error_ms = 100;
     int32_t  pos_limit_min      = -2147483647;
     int32_t  pos_limit_max      =  2147483647;
     uint32_t max_motor_speed    = 10000;
     uint16_t max_torque         = 2000;  /**< per-mille of rated  */
+    uint32_t rated_torque       = 0;     /**< 0x6076, mNm                  */
+
+    /* Read-only telemetry (0x6078). Populated on Read; ignored on
+     * Write. Kept in the DriveConfig blob so dialogs can present a
+     * single snapshot. */
+    int16_t  current_actual     = 0;     /**< 0x6078, per-mille of rated I */
 
     /* Encoder / scaling (0x608F:1 / 0x6091 / 0x6092). */
     uint32_t enc_resolution     = 16384; /**< counts per rev       */
@@ -109,6 +115,55 @@ struct DriveConfig
     uint32_t gear_den           = 1;
     uint32_t feed_const_num     = 1;
     uint32_t feed_const_den     = 1;
+
+    /* ---- Manufacturer-range parameters (0x20xx) --------------------
+     *
+     * Vendor-defined OD entries. Default index choices below assume a
+     * typical FOC drive layout; if your hardware uses different
+     * indices, override at the Custom-SDO tab or edit driveFields()
+     * in MasterWorker.cpp. All reads/writes go via the standard SDO
+     * helpers, so a slave that doesn't expose the index just abort
+     * with `0x06020000` and the read result is silently 0.
+     */
+    /* Node ID (vendor-defined; 0x2000:00, uint8). Change with care —
+     * commits to the slave's NVM only after a save+reset. */
+    uint8_t  node_id            = 0;
+
+    /* Per-loop manufacturer gain (parallel to CiA-402 standard via
+     * motor_drive_intf_get/set_gain; the Gains tab uses those, this
+     * tab uses vendor entries so you can compare or override). */
+    float    manuf_cur_kp       = 0.0f; /**< 0x2010:00 */
+    float    manuf_cur_ki       = 0.0f; /**< 0x2011:00 */
+    float    manuf_vel_kp       = 0.0f; /**< 0x2020:00 */
+    float    manuf_vel_ki       = 0.0f; /**< 0x2021:00 */
+    float    manuf_pos_kp       = 0.0f; /**< 0x2030:00 */
+    float    manuf_pos_ki       = 0.0f; /**< 0x2031:00 */
+
+    /* Per-phase current-sensor calibration. Offsets are signed raw
+     * counts (zero-current ADC reading); gains are unsigned scale
+     * factors (ADC counts → Amperes). */
+    int16_t  current_offset_a   = 0;    /**< 0x2040:01 */
+    int16_t  current_offset_b   = 0;    /**< 0x2040:02 */
+    int16_t  current_offset_c   = 0;    /**< 0x2040:03 */
+    uint16_t current_gain_a     = 0;    /**< 0x2041:01 */
+    uint16_t current_gain_b     = 0;    /**< 0x2041:02 */
+    uint16_t current_gain_c     = 0;    /**< 0x2041:03 */
+
+    /* Fault thresholds (all under 0x2050:nn). The drive raises the
+     * matching latched-fault bit when the named signal crosses the
+     * threshold for the (optional) accompanying time window. Units
+     * follow the typical FOC-drive vendor convention noted on each
+     * field — adjust if your drive disagrees. */
+    uint32_t over_current        = 0;   /**< 0x2050:01  mA          */
+    uint16_t over_load           = 0;   /**< 0x2050:02  % of rated  */
+    uint32_t over_load_ms        = 0;   /**< 0x2050:03  ms          */
+    uint32_t current_loss_phase  = 0;   /**< 0x2050:04  mA threshold (phase missing) */
+    uint32_t current_loss_phase_ms = 0; /**< 0x2050:05  ms          */
+    uint32_t unbalance_current   = 0;   /**< 0x2050:06  mA delta    */
+    uint32_t stall_ms            = 0;   /**< 0x2050:07  ms (no motion under load) */
+    uint32_t over_voltage        = 0;   /**< 0x2050:08  mV          */
+    uint32_t under_voltage       = 0;   /**< 0x2050:09  mV          */
+    int16_t  over_temperature    = 0;   /**< 0x2050:0A  °C × 10     */
 };
 
 /** Signal-generator waveform. */
@@ -142,6 +197,15 @@ public slots:
     void bringupOne (int idx, uint32_t timeoutMs);
     void enableOne  (int idx);
     void disableOne (int idx);
+    /** Quick Stop: write controlword 0x0002 (clear bit 2 = trigger
+     *  controlled decel per `Quick stop deceleration (0x6085)`).
+     *  Different from disableOne (motors free) and from E-STOP
+     *  (panic kill). */
+    void quickStopOne(int idx);
+    /** Manual CiA-402 walk: stream one explicit controlword via PDO
+     *  (bypassing cia402_master). Re-arms tx_active so the value
+     *  sticks until the next walk step or normal action. Debug aid. */
+    void walkControlwordOne(int idx, uint16_t cw);
     void faultReset (int idx);
     void setMode    (int idx, vrmc::Mode mode);
     void setTarget  (int idx, vrmc::TargetKind which, float value);
@@ -202,6 +266,26 @@ signals:
      *  the action rather than waiting on the next SDO refresh. */
     void calibrationDone   (int idx, QString what, int64_t raw, bool ok,
                             QString message);
+    /** Master-side controlword update after arm/disarm/quick-stop.
+     *  JointControlPanel mirrors this in its readout strip so the
+     *  operator sees what the master is actually telling each slave. */
+    void controlwordCached (int idx, uint16_t cw);
+
+    /** Custom-SDO operation completed. @p valueDecoded is the read-back
+     *  bytes formatted as a little-endian unsigned hex string (empty
+     *  for writes or failed reads). @p ok plus @p message give the
+     *  dialog enough to render success/failure with the abort code. */
+    void customSdoDone(int slaveIdx, bool isWrite, uint16_t odIdx, uint8_t sub,
+                       bool ok, QString valueDecoded, QString message);
+
+public slots:
+    /** Run an expedited SDO upload (read). @p byteLen is the number of
+     *  bytes to fetch (1/2/4 for typical CiA-301 datatypes). Result is
+     *  fired back as @ref customSdoDone. */
+    void customSdoRead (int slaveIdx, uint16_t odIdx, uint8_t sub, int byteLen);
+    /** Run an expedited SDO download (write). @p bytes is the LE-encoded
+     *  payload; len matches the underlying datatype size. */
+    void customSdoWrite(int slaveIdx, uint16_t odIdx, uint8_t sub, QByteArray bytes);
 
 private slots:
     void onTick();                  /**< QTimer callback running refresh + pump */

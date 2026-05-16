@@ -345,16 +345,20 @@ void BodeView::setActiveSlave(int idx, const QString& name)
     } else {
         m_label->setText(tr("Slave %1 — %2").arg(idx).arg(name));
     }
-    const bool en = (idx >= 0) && !m_sweeping;
+    /* Form parameter widgets gate on (slave selected && not sweeping)
+     * so the operator can't change them mid-sweep. m_runBtn is gated
+     * only on slave-selected — it doubles as the Stop button while a
+     * sweep is in flight, so it must stay clickable. */
+    const bool formEn = (idx >= 0) && !m_sweeping;
     for (QWidget* w : { static_cast<QWidget*>(m_target),
                         static_cast<QWidget*>(m_fStart),
                         static_cast<QWidget*>(m_fEnd),
                         static_cast<QWidget*>(m_points),
                         static_cast<QWidget*>(m_ampSpin),
-                        static_cast<QWidget*>(m_cycles),
-                        static_cast<QWidget*>(m_runBtn) }){
-        w->setEnabled(en);
+                        static_cast<QWidget*>(m_cycles) }){
+        w->setEnabled(formEn);
     }
+    m_runBtn->setEnabled(idx >= 0);
 }
 
 void BodeView::resetCharts()
@@ -367,6 +371,23 @@ void BodeView::resetCharts()
 
 void BodeView::onRunClicked()
 {
+    /* Toggle behaviour: while a sweep is in flight the same button
+     * acts as Stop. Earlier revisions disabled the button during the
+     * sweep, which left the operator no way to abort a long log-sweep
+     * mid-way without disconnecting. */
+    if (m_sweeping){
+        m_sweeping = false;                /* gate onGeneratorStopped so
+                                            * it doesn't advance to the
+                                            * next point after our abort */
+        emit stopGenRequested(m_idx);      /* tell the worker to halt the
+                                            * in-flight point generator */
+        m_status->setText(tr("stopped"));
+        setActiveSlave(m_idx);             /* re-enables form widgets +
+                                            * restores the Run button   */
+        m_runBtn->setText(tr("Run sweep"));
+        return;
+    }
+
     if (m_idx < 0){ return; }
     const double f0 = m_fStart->value();
     const double f1 = m_fEnd->value();
@@ -389,13 +410,15 @@ void BodeView::onRunClicked()
     resetCharts();
     m_sweeping = true;
     m_pointIdx = 0;
+    /* Form widgets disabled so the operator can't change parameters
+     * mid-sweep, but keep m_runBtn live and re-label it as Stop. */
     for (QWidget* w : { static_cast<QWidget*>(m_target),
                         static_cast<QWidget*>(m_fStart),
                         static_cast<QWidget*>(m_fEnd),
                         static_cast<QWidget*>(m_points),
                         static_cast<QWidget*>(m_ampSpin),
-                        static_cast<QWidget*>(m_cycles),
-                        static_cast<QWidget*>(m_runBtn) }){ w->setEnabled(false); }
+                        static_cast<QWidget*>(m_cycles) }){ w->setEnabled(false); }
+    m_runBtn->setText(tr("Stop"));
 
     startNextPoint();
 }
@@ -406,6 +429,7 @@ void BodeView::startNextPoint()
         m_sweeping = false;
         m_status->setText(tr("done"));
         setActiveSlave(m_idx);
+        m_runBtn->setText(tr("Run sweep"));
         return;
     }
     const double f = m_freqs[m_pointIdx];
