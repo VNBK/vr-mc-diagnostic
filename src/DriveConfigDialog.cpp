@@ -11,8 +11,10 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
+#include <cmath>
 #include <limits>
 
 namespace vrmc {
@@ -30,6 +32,39 @@ QSpinBox* makeSpin(int minVal, int maxVal, int value,
         s->setSuffix(QStringLiteral(" ") + suffix);
     }
     return s;
+}
+
+QDoubleSpinBox* makeDSpin(double minVal, double maxVal, int decimals,
+                          const QString& suffix = QString())
+{
+    auto* s = new QDoubleSpinBox;
+    s->setRange(minVal, maxVal);
+    s->setDecimals(decimals);
+    s->setValue(0.0);
+    s->setAlignment(Qt::AlignRight);
+    if (!suffix.isEmpty()){
+        s->setSuffix(QStringLiteral(" ") + suffix);
+    }
+    return s;
+}
+
+/* ---- SI <-> CiA-402 wire-unit conversion ---------------------------- *
+ *
+ * The dialog presents everything in SI; the DriveConfig blob (and the
+ * wire) stay in CiA-402 units. Position/velocity assume a fixed encoder
+ * resolution -- this must match the drive (board: 14-bit, 16384/rev).
+ * Torque/current scale by the live rated values read from the drive. */
+constexpr double kTwoPi          = 6.283185307179586;
+constexpr double kIncPerRevDflt  = 16384.0;   /* fallback if 0x608F unread */
+
+inline double incToRad (double inc, double cpr) { return inc * kTwoPi / cpr; }
+inline double radToInc (double rad, double cpr) { return rad * cpr / kTwoPi; }
+inline double rpmToRadS(double rpm) { return rpm * kTwoPi / 60.0; }
+inline double radSToRpm(double rs ) { return rs  * 60.0 / kTwoPi; }
+/* per-mille of rated <-> physical, given the rated quantity (Nm or A). */
+inline double milliToPhys(double milli, double rated){ return milli / 1000.0 * rated; }
+inline double physToMilli(double phys,  double rated){
+    return (rated != 0.0) ? (phys / rated * 1000.0) : 0.0;
 }
 
 /* The CiA 402 §7 table of standard homing methods, with the ones most
@@ -78,19 +113,16 @@ DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
     auto* tHoming  = new QWidget;
     auto* tMotion  = new QWidget;
     auto* tProtect = new QWidget;
-    auto* tEncoder = new QWidget;
     auto* tManuf   = new QWidget;
     auto* tCustom  = new QWidget;
     buildHomingTab      (tHoming);
     buildMotionTab      (tMotion);
     buildProtectTab     (tProtect);
-    buildEncoderTab     (tEncoder);
     buildManufacturerTab(tManuf);
     buildCustomTab      (tCustom);
     tabs->addTab(tHoming,  tr("Homing"));
     tabs->addTab(tMotion,  tr("Motion profile"));
     tabs->addTab(tProtect, tr("Protection"));
-    tabs->addTab(tEncoder, tr("Encoder"));
     tabs->addTab(tManuf,   tr("Manufacturer"));
     tabs->addTab(tCustom,  tr("Custom SDO"));
 
@@ -121,21 +153,38 @@ DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
     root->addWidget(m_buttons);
 
     setConfig(DriveConfig{});
-    /* Ask the layout for its natural footprint so all tabs (and the
-     * widest one, "Fault thresholds", in particular) are fully visible
-     * the moment the dialog is shown. Without this the dialog comes up
-     * at QDialog's default tiny size and the operator has to drag a
-     * corner before they can see the spinboxes. */
+    m_tabs = tabs;
+    /* Pre-size every tab page to the maximum sizeHint across all tabs
+     * so that the QTabWidget's own sizeHint (which is just the current
+     * page's) reflects the worst-case footprint. Without this, the
+     * first-shown tab (Homing) is small → adjustSize() picks a tiny
+     * dialog → switching to Manufacturer / Custom SDO clips the
+     * spinboxes until the user manually drags the corner. */
+    fitTabsToLargest();
     adjustSize();
 }
 
 void DriveConfigDialog::showEvent(QShowEvent* e)
 {
     QDialog::showEvent(e);
-    /* Re-fit on every show in case the tab contents were modified
-     * between opens (e.g. the operator typed a long value into the
-     * Custom-SDO result label which then asked for more width). */
+    fitTabsToLargest();
     adjustSize();
+}
+
+void DriveConfigDialog::fitTabsToLargest()
+{
+    /* QTabWidget's sizeHint is unreliable on first show: non-current
+     * pages live in a lazy QStackedWidget that doesn't always realise
+     * their layout in time for adjustSize() to read correctly. So we
+     * just hardcode a footprint sized to comfortably hold the widest
+     * tab — Manufacturer, with 4 group boxes incl. the 10-field Fault
+     * thresholds matrix. Users can shrink it later if they want. */
+    constexpr int kMinW = 720;
+    constexpr int kMinH = 880;
+    setMinimumSize(kMinW, kMinH);
+    if (size().width() < kMinW || size().height() < kMinH){
+        resize(kMinW, kMinH);
+    }
 }
 
 void DriveConfigDialog::buildHomingTab(QWidget* host)
@@ -151,11 +200,10 @@ void DriveConfigDialog::buildHomingTab(QWidget* host)
          * fromLatin1 silently mangled the em-dash variants. */
         m_homingMethod->addItem(QString::fromUtf8(m.label), int(m.value));
     }
-    m_homeOffset  = makeSpin(std::numeric_limits<int>::min(),
-                             std::numeric_limits<int>::max(), 0, tr("counts"));
-    m_homingFast  = makeSpin(0, 1'000'000, 100, tr("cnt/s"));
-    m_homingSlow  = makeSpin(0, 1'000'000,  10, tr("cnt/s"));
-    m_homingAccel = makeSpin(0, 1'000'000, 1000, tr("cnt/s²"));
+    m_homeOffset  = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+    m_homingFast  = makeDSpin(0, 1e4, 3, tr("rad/s"));
+    m_homingSlow  = makeDSpin(0, 1e4, 3, tr("rad/s"));
+    m_homingAccel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
 
     form->addRow(tr("Method (0x6098)"),       m_homingMethod);
     form->addRow(tr("Home offset (0x607C)"),  m_homeOffset);
@@ -196,10 +244,10 @@ void DriveConfigDialog::buildHomingTab(QWidget* host)
 void DriveConfigDialog::buildMotionTab(QWidget* host)
 {
     auto* form = new QFormLayout(host);
-    m_profileVel     = makeSpin(0, 1'000'000, 1000, tr("cnt/s"));
-    m_profileAccel   = makeSpin(0, 1'000'000, 5000, tr("cnt/s²"));
-    m_profileDecel   = makeSpin(0, 1'000'000, 5000, tr("cnt/s²"));
-    m_quickstopDecel = makeSpin(0, 1'000'000, 10000, tr("cnt/s²"));
+    m_profileVel     = makeDSpin(0, 1e4, 3, tr("rad/s"));
+    m_profileAccel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+    m_profileDecel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+    m_quickstopDecel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
     form->addRow(tr("Profile velocity (0x6081)"),     m_profileVel);
     form->addRow(tr("Profile acceleration (0x6083)"), m_profileAccel);
     form->addRow(tr("Profile deceleration (0x6084)"), m_profileDecel);
@@ -213,26 +261,22 @@ void DriveConfigDialog::buildProtectTab(QWidget* host)
     auto* formWrap = new QWidget(host);
     auto* form = new QFormLayout(formWrap);
     form->setContentsMargins(0, 0, 0, 0);
-    m_followingError = makeSpin(0, 1'000'000, 5000, tr("counts"));
-    m_followingMs    = makeSpin(0, 60000,      100, tr("ms"));
-    m_posMin         = makeSpin(std::numeric_limits<int>::min(),
-                                std::numeric_limits<int>::max(),
-                                std::numeric_limits<int>::min() + 1, tr("counts"));
-    m_posMax         = makeSpin(std::numeric_limits<int>::min(),
-                                std::numeric_limits<int>::max(),
-                                std::numeric_limits<int>::max(),    tr("counts"));
-    m_maxSpeed       = makeSpin(0, 1'000'000, 10000, tr("cnt/s"));
-    m_maxTorque      = makeSpin(0, 10000,     2000, tr("‰ rated"));
-    m_ratedTorque    = makeSpin(0, std::numeric_limits<int>::max(),
-                                0, tr("mNm"));
-    /* Current actual is read-only (0x6078). Drive populates on Read;
-     * write pass skips it. Rendered as a label, not a spinbox, so the
-     * operator can't accidentally type into it. */
-    m_currentActual  = new QLabel(QStringLiteral("—"), host);
-    m_currentActual->setStyleSheet(QStringLiteral(
-        "QLabel { font-family: monospace; padding: 2px 8px; "
-        "         border: 1px solid #555; border-radius: 3px; "
-        "         background: #1a1a1a; color: #cfd8e3; }"));
+    m_followingError = makeDSpin(0, 1e6, 4, tr("rad"));
+    m_followingMs    = makeSpin(0, 60000, 100, tr("ms"));
+    m_posMin         = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+    m_posMax         = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+    m_maxSpeed       = makeDSpin(0, 1e4, 3, tr("rad/s"));
+    m_maxTorque      = makeDSpin(0, 1e4, 4, tr("Nm"));
+    m_ratedTorque    = makeDSpin(0, 1e4, 4, tr("Nm"));
+    /* 0x6076 is derived (= Kt * rated current) and read-only on the drive;
+     * show it but don't let the user edit/write it. */
+    m_ratedTorque->setReadOnly(true);
+    m_ratedTorque->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_ratedCurrent   = makeDSpin(0, 1e4, 3, tr("A"));
+    /* Protection: stall trip (vendor 0x2050). Current actual moved to
+     * the telemetry graph; encoder resolution moved to Manufacturer. */
+    m_stallCurrent = makeSpin(0, 1'000'000, 0, tr("mA"));
+    m_stallTime    = makeSpin(0, 60000,     0, tr("ms"));
 
     form->addRow(tr("Max following error (0x6065)"), m_followingError);
     form->addRow(tr("Following error time (0x6066)"), m_followingMs);
@@ -240,8 +284,10 @@ void DriveConfigDialog::buildProtectTab(QWidget* host)
     form->addRow(tr("Pos limit max (0x607D:2)"),      m_posMax);
     form->addRow(tr("Max motor speed (0x6080)"),      m_maxSpeed);
     form->addRow(tr("Max torque (0x6072)"),           m_maxTorque);
-    form->addRow(tr("Rated torque (0x6076)"),         m_ratedTorque);
-    form->addRow(tr("Current actual (0x6078, RO)"),   m_currentActual);
+    form->addRow(tr("Rated torque (0x6076, derived)"), m_ratedTorque);
+    form->addRow(tr("Rated current (0x6075)"),        m_ratedCurrent);
+    form->addRow(tr("Stall current (0x2050:1)"),      m_stallCurrent);
+    form->addRow(tr("Stall time (0x2050:2)"),         m_stallTime);
     root->addWidget(formWrap);
 
     m_zeroTorqueBtn = new QPushButton(tr("Zero torque here"), host);
@@ -263,33 +309,12 @@ void DriveConfigDialog::buildProtectTab(QWidget* host)
     root->addStretch(1);
 }
 
-void DriveConfigDialog::buildEncoderTab(QWidget* host)
-{
-    auto* form = new QFormLayout(host);
-    m_encRes  = makeSpin(1, 1'000'000'000, 16384, tr("counts/rev"));
-    m_gearNum = makeSpin(1, 1'000'000, 1);
-    m_gearDen = makeSpin(1, 1'000'000, 1);
-    m_feedNum = makeSpin(1, 1'000'000, 1);
-    m_feedDen = makeSpin(1, 1'000'000, 1);
-
-    form->addRow(tr("Encoder resolution (0x608F:1)"), m_encRes);
-    form->addRow(tr("Gear numerator (0x6091:1)"),      m_gearNum);
-    form->addRow(tr("Gear denominator (0x6091:2)"),    m_gearDen);
-    form->addRow(tr("Feed const numerator (0x6092:1)"), m_feedNum);
-    form->addRow(tr("Feed const denominator (0x6092:2)"), m_feedDen);
-}
-
 /* ------------------------------------------------------------ Manufacturer
  *
- * Vendor-defined OD entries — Node ID, per-loop gains via the manufacturer
- * range (parallel to the Gains tab which uses motor_drive_intf abstractions),
- * per-phase current-sensor calibration, and the over-current trip threshold.
- *
- * All indices below are placeholders for a typical FOC drive layout. If
- * your hardware uses different indices, override at the Custom-SDO tab
- * or edit driveFields() in MasterWorker.cpp. Slaves that don't expose
- * an index will silently abort the read with 0x06020000 and the
- * spinbox will remain at 0. */
+ * Vendor-range (0x20xx) objects: Node ID (0x2000:01), per-phase current
+ * sensor calibration (offsets 0x2040 + gains 0x2041, RW), Hall offset
+ * (0x2060), and the motor-profile electrical record (0x2070). PID loop
+ * gains are on the Gains tab (standard 0x60F6/0x60F9/0x60FB). */
 void DriveConfigDialog::buildManufacturerTab(QWidget* host)
 {
     auto* root = new QVBoxLayout(host);
@@ -308,39 +333,20 @@ void DriveConfigDialog::buildManufacturerTab(QWidget* host)
     {
         auto* form = new QFormLayout(idBox);
         m_mfNodeId = makeSpin(1, 127, 5);  /* CANopen node IDs are 1..127 */
-        form->addRow(tr("Node ID (0x2000:00)"), m_mfNodeId);
+        form->addRow(tr("Node ID (0x2000:01)"), m_mfNodeId);
     }
     root->addWidget(idBox);
 
-    /* --- Per-loop gains (manufacturer parallel path to Gains tab) --- */
-    auto* gainBox = new QGroupBox(tr("Loop gains (manufacturer)"), host);
-    {
-        auto* form = new QFormLayout(gainBox);
-        m_mfCurKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        m_mfCurKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        m_mfVelKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        m_mfVelKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        m_mfPosKp = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        m_mfPosKi = makeDoubleSpin(0.0, 1e6, 0.0, 4);
-        form->addRow(tr("Current Kp (0x2010)"), m_mfCurKp);
-        form->addRow(tr("Current Ki (0x2011)"), m_mfCurKi);
-        form->addRow(tr("Velocity Kp (0x2020)"), m_mfVelKp);
-        form->addRow(tr("Velocity Ki (0x2021)"), m_mfVelKi);
-        form->addRow(tr("Position Kp (0x2030)"), m_mfPosKp);
-        form->addRow(tr("Position Ki (0x2031)"), m_mfPosKi);
-    }
-    root->addWidget(gainBox);
-
-    /* --- Per-phase current sensor calibration --- */
+    /* --- Per-phase current sensor calibration (writable) --- */
     auto* phaseBox = new QGroupBox(tr("Current sensor calibration"), host);
     {
         auto* form = new QFormLayout(phaseBox);
-        m_mfCurOffA = makeSpin(-32768, 32767, 0, tr("counts"));
-        m_mfCurOffB = makeSpin(-32768, 32767, 0, tr("counts"));
-        m_mfCurOffC = makeSpin(-32768, 32767, 0, tr("counts"));
-        m_mfCurGainA = makeSpin(0, 65535, 0);
-        m_mfCurGainB = makeSpin(0, 65535, 0);
-        m_mfCurGainC = makeSpin(0, 65535, 0);
+        m_mfCurOffA  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
+        m_mfCurOffB  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
+        m_mfCurOffC  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
+        m_mfCurGainA = makeDoubleSpin(0.0, 1e6, 1.0, 4);
+        m_mfCurGainB = makeDoubleSpin(0.0, 1e6, 1.0, 4);
+        m_mfCurGainC = makeDoubleSpin(0.0, 1e6, 1.0, 4);
         form->addRow(tr("Current offset A (0x2040:1)"), m_mfCurOffA);
         form->addRow(tr("Current offset B (0x2040:2)"), m_mfCurOffB);
         form->addRow(tr("Current offset C (0x2040:3)"), m_mfCurOffC);
@@ -350,35 +356,28 @@ void DriveConfigDialog::buildManufacturerTab(QWidget* host)
     }
     root->addWidget(phaseBox);
 
-    /* --- Trip thresholds (10 sub-indices under 0x2050) --- */
-    auto* faultBox = new QGroupBox(tr("Fault thresholds (0x2050)"), host);
+    /* --- Commutation + encoder resolution --- */
+    auto* commBox = new QGroupBox(tr("Commutation / encoder"), host);
     {
-        auto* form = new QFormLayout(faultBox);
-        const int kMaxU32 = std::numeric_limits<int>::max();
-        m_mfFltOverCur     = makeSpin(0, kMaxU32, 0, tr("mA"));
-        m_mfFltOverLoad    = makeSpin(0, 1000,    0, tr("% rated"));
-        m_mfFltOverLoadMs  = makeSpin(0, kMaxU32, 0, tr("ms"));
-        m_mfFltLossPhase   = makeSpin(0, kMaxU32, 0, tr("mA"));
-        m_mfFltLossPhaseMs = makeSpin(0, kMaxU32, 0, tr("ms"));
-        m_mfFltUnbalance   = makeSpin(0, kMaxU32, 0, tr("mA"));
-        m_mfFltStallMs     = makeSpin(0, kMaxU32, 0, tr("ms"));
-        m_mfFltOverVolt    = makeSpin(0, kMaxU32, 0, tr("mV"));
-        m_mfFltUnderVolt   = makeSpin(0, kMaxU32, 0, tr("mV"));
-        /* Temperature is signed °C × 10 (so -40.0°C = -400). */
-        m_mfFltOverTemp    = makeSpin(-3000, 3000, 0, tr("°C × 10"));
-
-        form->addRow(tr("Over current (:01)"),         m_mfFltOverCur);
-        form->addRow(tr("Over load (:02)"),            m_mfFltOverLoad);
-        form->addRow(tr("Over load time (:03)"),       m_mfFltOverLoadMs);
-        form->addRow(tr("Current loss phase (:04)"),   m_mfFltLossPhase);
-        form->addRow(tr("Current loss phase time (:05)"), m_mfFltLossPhaseMs);
-        form->addRow(tr("Unbalance current (:06)"),    m_mfFltUnbalance);
-        form->addRow(tr("Stall time (:07)"),           m_mfFltStallMs);
-        form->addRow(tr("Over voltage (:08)"),         m_mfFltOverVolt);
-        form->addRow(tr("Under voltage (:09)"),        m_mfFltUnderVolt);
-        form->addRow(tr("Over temperature (:0A)"),     m_mfFltOverTemp);
+        auto* form = new QFormLayout(commBox);
+        m_mfHallOffset = makeDoubleSpin(-7.0, 7.0, 0.0, 5);
+        m_mfHallOffset->setSuffix(tr(" rad"));
+        m_encInc  = makeSpin(1, 1'000'000'000, 16384, tr("inc"));
+        m_encRevs = makeSpin(1, 1'000'000,     1,     tr("rev"));
+        form->addRow(tr("Hall offset (0x2060)"),          m_mfHallOffset);
+        form->addRow(tr("Encoder increments (0x608F:1)"), m_encInc);
+        form->addRow(tr("Motor revolutions (0x608F:2)"),  m_encRevs);
     }
-    root->addWidget(faultBox);
+    root->addWidget(commBox);
+
+    auto* note = new QLabel(
+        tr("Motor profile (type, Rs, Ls, flux, …) is on the <b>Motor "
+           "Profile</b> editor — its OK writes 0x2070 to the selected "
+           "drive. PID loop gains are on the <b>Gains</b> tab "
+           "(0x60F6 / 0x60F9 / 0x60FB)."), host);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral("QLabel { color: #9aa; padding: 4px; }"));
+    root->addWidget(note);
     root->addStretch(1);
 }
 
@@ -528,118 +527,96 @@ void DriveConfigDialog::setConfig(const DriveConfig& cfg)
 {
     const int methodPos = m_homingMethod->findData(int(cfg.homing_method));
     m_homingMethod->setCurrentIndex(methodPos < 0 ? 0 : methodPos);
-    m_homeOffset     ->setValue(int(cfg.home_offset));
-    m_homingFast     ->setValue(int(cfg.homing_speed_fast));
-    m_homingSlow     ->setValue(int(cfg.homing_speed_slow));
-    m_homingAccel    ->setValue(int(cfg.homing_accel));
+    /* CiA wire units -> SI for display. Torque/current use the live
+     * rated values; position/velocity use the drive's reported encoder
+     * resolution (0x608F), falling back to 16384 inc/rev. */
+    const double rated_nm = cfg.rated_torque  / 1000.0;   /* mNm -> Nm */
+    const double rated_a  = cfg.rated_current / 1000.0;   /* mA  -> A  */
+    m_countsPerRev = (cfg.enc_increments != 0u && cfg.enc_motor_revs != 0u)
+                   ? (double(cfg.enc_increments) / double(cfg.enc_motor_revs))
+                   : kIncPerRevDflt;
+    const double cpr = m_countsPerRev;
+    if (m_encInc)  m_encInc ->setValue(static_cast<int>(cfg.enc_increments));
+    if (m_encRevs) m_encRevs->setValue(static_cast<int>(cfg.enc_motor_revs));
 
-    m_profileVel     ->setValue(int(cfg.profile_velocity));
-    m_profileAccel   ->setValue(int(cfg.profile_accel));
-    m_profileDecel   ->setValue(int(cfg.profile_decel));
-    m_quickstopDecel ->setValue(int(cfg.quickstop_decel));
+    m_homeOffset     ->setValue(incToRad (int32_t(cfg.home_offset), cpr));
+    m_homingFast     ->setValue(incToRad (cfg.homing_speed_fast, cpr));
+    m_homingSlow     ->setValue(incToRad (cfg.homing_speed_slow, cpr));
+    m_homingAccel    ->setValue(incToRad (cfg.homing_accel, cpr));
 
-    m_followingError ->setValue(int(cfg.following_error));
+    m_profileVel     ->setValue(incToRad (cfg.profile_velocity, cpr));
+    m_profileAccel   ->setValue(incToRad (cfg.profile_accel, cpr));
+    m_profileDecel   ->setValue(incToRad (cfg.profile_decel, cpr));
+    m_quickstopDecel ->setValue(incToRad (cfg.quickstop_decel, cpr));
+
+    m_followingError ->setValue(incToRad (cfg.following_error, cpr));
     m_followingMs    ->setValue(int(cfg.following_error_ms));
-    m_posMin         ->setValue(int(cfg.pos_limit_min));
-    m_posMax         ->setValue(int(cfg.pos_limit_max));
-    m_maxSpeed       ->setValue(int(cfg.max_motor_speed));
-    m_maxTorque      ->setValue(int(cfg.max_torque));
-    m_ratedTorque    ->setValue(int(cfg.rated_torque));
-    /* Render current_actual as `±N ‰  (±N.NNN A)` when rated torque is
-     * also known — otherwise just the raw per-mille reading. */
-    if (m_currentActual){
-        const int per_mille = cfg.current_actual;
-        m_currentActual->setText(QStringLiteral("%1%2 ‰")
-            .arg(per_mille >= 0 ? QStringLiteral("+") : QString())
-            .arg(per_mille));
-    }
-
-    m_encRes         ->setValue(int(cfg.enc_resolution));
-    m_gearNum        ->setValue(int(cfg.gear_num));
-    m_gearDen        ->setValue(int(cfg.gear_den));
-    m_feedNum        ->setValue(int(cfg.feed_const_num));
-    m_feedDen        ->setValue(int(cfg.feed_const_den));
+    m_posMin         ->setValue(incToRad (int32_t(cfg.pos_limit_min), cpr));
+    m_posMax         ->setValue(incToRad (int32_t(cfg.pos_limit_max), cpr));
+    m_maxSpeed       ->setValue(rpmToRadS(cfg.max_motor_speed));
+    m_maxTorque      ->setValue(milliToPhys(cfg.max_torque, rated_nm));
+    m_ratedTorque    ->setValue(rated_nm);
+    if (m_ratedCurrent) m_ratedCurrent->setValue(rated_a);
+    if (m_stallCurrent) m_stallCurrent->setValue(int(cfg.stall_current));
+    if (m_stallTime)    m_stallTime   ->setValue(int(cfg.stall_time));
 
     /* Manufacturer-range fields. */
     if (m_mfNodeId)     m_mfNodeId    ->setValue(int(cfg.node_id));
-    if (m_mfCurKp)      m_mfCurKp     ->setValue(cfg.manuf_cur_kp);
-    if (m_mfCurKi)      m_mfCurKi     ->setValue(cfg.manuf_cur_ki);
-    if (m_mfVelKp)      m_mfVelKp     ->setValue(cfg.manuf_vel_kp);
-    if (m_mfVelKi)      m_mfVelKi     ->setValue(cfg.manuf_vel_ki);
-    if (m_mfPosKp)      m_mfPosKp     ->setValue(cfg.manuf_pos_kp);
-    if (m_mfPosKi)      m_mfPosKi     ->setValue(cfg.manuf_pos_ki);
-    if (m_mfCurOffA)    m_mfCurOffA   ->setValue(int(cfg.current_offset_a));
-    if (m_mfCurOffB)    m_mfCurOffB   ->setValue(int(cfg.current_offset_b));
-    if (m_mfCurOffC)    m_mfCurOffC   ->setValue(int(cfg.current_offset_c));
-    if (m_mfCurGainA)   m_mfCurGainA  ->setValue(int(cfg.current_gain_a));
-    if (m_mfCurGainB)   m_mfCurGainB  ->setValue(int(cfg.current_gain_b));
-    if (m_mfCurGainC)   m_mfCurGainC  ->setValue(int(cfg.current_gain_c));
-    if (m_mfFltOverCur)     m_mfFltOverCur    ->setValue(int(cfg.over_current));
-    if (m_mfFltOverLoad)    m_mfFltOverLoad   ->setValue(int(cfg.over_load));
-    if (m_mfFltOverLoadMs)  m_mfFltOverLoadMs ->setValue(int(cfg.over_load_ms));
-    if (m_mfFltLossPhase)   m_mfFltLossPhase  ->setValue(int(cfg.current_loss_phase));
-    if (m_mfFltLossPhaseMs) m_mfFltLossPhaseMs->setValue(int(cfg.current_loss_phase_ms));
-    if (m_mfFltUnbalance)   m_mfFltUnbalance  ->setValue(int(cfg.unbalance_current));
-    if (m_mfFltStallMs)     m_mfFltStallMs    ->setValue(int(cfg.stall_ms));
-    if (m_mfFltOverVolt)    m_mfFltOverVolt   ->setValue(int(cfg.over_voltage));
-    if (m_mfFltUnderVolt)   m_mfFltUnderVolt  ->setValue(int(cfg.under_voltage));
-    if (m_mfFltOverTemp)    m_mfFltOverTemp   ->setValue(int(cfg.over_temperature));
+    if (m_mfCurOffA)    m_mfCurOffA   ->setValue(double(cfg.current_offset_a));
+    if (m_mfCurOffB)    m_mfCurOffB   ->setValue(double(cfg.current_offset_b));
+    if (m_mfCurOffC)    m_mfCurOffC   ->setValue(double(cfg.current_offset_c));
+    if (m_mfCurGainA)   m_mfCurGainA  ->setValue(double(cfg.current_gain_a));
+    if (m_mfCurGainB)   m_mfCurGainB  ->setValue(double(cfg.current_gain_b));
+    if (m_mfCurGainC)   m_mfCurGainC  ->setValue(double(cfg.current_gain_c));
+    if (m_mfHallOffset) m_mfHallOffset->setValue(double(cfg.hall_offset));
 }
 
 DriveConfig DriveConfigDialog::config() const
 {
     DriveConfig c;
+    /* SI (dialog) -> CiA wire units. Rated torque/current are harvested
+     * first so the per-mille max-torque conversion uses the new ratings. */
+    const double rated_nm = m_ratedTorque->value();              /* Nm */
+    const double rated_a  = m_ratedCurrent ? m_ratedCurrent->value() : 0.0;
+    /* Use the live (possibly edited) encoder resolution for SI<->inc. */
+    if (m_encInc)  c.enc_increments = static_cast<uint32_t>(m_encInc->value());
+    if (m_encRevs) c.enc_motor_revs = static_cast<uint32_t>(m_encRevs->value());
+    const double cpr = (c.enc_increments != 0u && c.enc_motor_revs != 0u)
+                     ? (double(c.enc_increments) / double(c.enc_motor_revs))
+                     : m_countsPerRev;
+
     c.homing_method      = int8_t(m_homingMethod->currentData().toInt());
-    c.home_offset        = int32_t(m_homeOffset->value());
-    c.homing_speed_fast  = uint32_t(m_homingFast->value());
-    c.homing_speed_slow  = uint32_t(m_homingSlow->value());
-    c.homing_accel       = uint32_t(m_homingAccel->value());
+    c.home_offset        = int32_t (lround(radToInc(m_homeOffset->value(), cpr)));
+    c.homing_speed_fast  = uint32_t(lround(radToInc(m_homingFast->value(), cpr)));
+    c.homing_speed_slow  = uint32_t(lround(radToInc(m_homingSlow->value(), cpr)));
+    c.homing_accel       = uint32_t(lround(radToInc(m_homingAccel->value(), cpr)));
 
-    c.profile_velocity   = uint32_t(m_profileVel->value());
-    c.profile_accel      = uint32_t(m_profileAccel->value());
-    c.profile_decel      = uint32_t(m_profileDecel->value());
-    c.quickstop_decel    = uint32_t(m_quickstopDecel->value());
+    c.profile_velocity   = uint32_t(lround(radToInc(m_profileVel->value(), cpr)));
+    c.profile_accel      = uint32_t(lround(radToInc(m_profileAccel->value(), cpr)));
+    c.profile_decel      = uint32_t(lround(radToInc(m_profileDecel->value(), cpr)));
+    c.quickstop_decel    = uint32_t(lround(radToInc(m_quickstopDecel->value(), cpr)));
 
-    c.following_error    = uint32_t(m_followingError->value());
+    c.following_error    = uint32_t(lround(radToInc(m_followingError->value(), cpr)));
     c.following_error_ms = uint16_t(m_followingMs->value());
-    c.pos_limit_min      = int32_t(m_posMin->value());
-    c.pos_limit_max      = int32_t(m_posMax->value());
-    c.max_motor_speed    = uint32_t(m_maxSpeed->value());
-    c.max_torque         = uint16_t(m_maxTorque->value());
-    c.rated_torque       = uint32_t(m_ratedTorque->value());
-    /* current_actual is RO; preserve a 0 so write path skips it. */
-    c.current_actual     = 0;
+    c.pos_limit_min      = int32_t (lround(radToInc(m_posMin->value(), cpr)));
+    c.pos_limit_max      = int32_t (lround(radToInc(m_posMax->value(), cpr)));
+    c.max_motor_speed    = uint32_t(lround(radSToRpm(m_maxSpeed->value())));
+    c.max_torque         = uint16_t(lround(physToMilli(m_maxTorque->value(), rated_nm)));
+    /* c.rated_torque (0x6076) is NOT set: it is derived/read-only on the
+     * drive. rated_nm above is still used for the max-torque per-mille scale. */
+    if (m_ratedCurrent) c.rated_current = uint32_t(lround(rated_a * 1000.0)); /* A -> mA */
+    if (m_stallCurrent) c.stall_current = uint32_t(m_stallCurrent->value());
+    if (m_stallTime)    c.stall_time    = uint32_t(m_stallTime->value());
 
-    c.enc_resolution     = uint32_t(m_encRes->value());
-    c.gear_num           = uint32_t(m_gearNum->value());
-    c.gear_den           = uint32_t(m_gearDen->value());
-    c.feed_const_num     = uint32_t(m_feedNum->value());
-    c.feed_const_den     = uint32_t(m_feedDen->value());
-
-    /* Manufacturer-range fields (0x20xx). */
+    /* Manufacturer-range fields (0x20xx), all RW. */
     if (m_mfNodeId)     c.node_id          = uint8_t (m_mfNodeId->value());
-    if (m_mfCurKp)      c.manuf_cur_kp     = float   (m_mfCurKp->value());
-    if (m_mfCurKi)      c.manuf_cur_ki     = float   (m_mfCurKi->value());
-    if (m_mfVelKp)      c.manuf_vel_kp     = float   (m_mfVelKp->value());
-    if (m_mfVelKi)      c.manuf_vel_ki     = float   (m_mfVelKi->value());
-    if (m_mfPosKp)      c.manuf_pos_kp     = float   (m_mfPosKp->value());
-    if (m_mfPosKi)      c.manuf_pos_ki     = float   (m_mfPosKi->value());
-    if (m_mfCurOffA)    c.current_offset_a = int16_t (m_mfCurOffA->value());
-    if (m_mfCurOffB)    c.current_offset_b = int16_t (m_mfCurOffB->value());
-    if (m_mfCurOffC)    c.current_offset_c = int16_t (m_mfCurOffC->value());
-    if (m_mfCurGainA)   c.current_gain_a   = uint16_t(m_mfCurGainA->value());
-    if (m_mfCurGainB)   c.current_gain_b   = uint16_t(m_mfCurGainB->value());
-    if (m_mfCurGainC)   c.current_gain_c   = uint16_t(m_mfCurGainC->value());
-    if (m_mfFltOverCur)     c.over_current           = uint32_t(m_mfFltOverCur->value());
-    if (m_mfFltOverLoad)    c.over_load              = uint16_t(m_mfFltOverLoad->value());
-    if (m_mfFltOverLoadMs)  c.over_load_ms           = uint32_t(m_mfFltOverLoadMs->value());
-    if (m_mfFltLossPhase)   c.current_loss_phase     = uint32_t(m_mfFltLossPhase->value());
-    if (m_mfFltLossPhaseMs) c.current_loss_phase_ms  = uint32_t(m_mfFltLossPhaseMs->value());
-    if (m_mfFltUnbalance)   c.unbalance_current      = uint32_t(m_mfFltUnbalance->value());
-    if (m_mfFltStallMs)     c.stall_ms               = uint32_t(m_mfFltStallMs->value());
-    if (m_mfFltOverVolt)    c.over_voltage           = uint32_t(m_mfFltOverVolt->value());
-    if (m_mfFltUnderVolt)   c.under_voltage          = uint32_t(m_mfFltUnderVolt->value());
-    if (m_mfFltOverTemp)    c.over_temperature       = int16_t (m_mfFltOverTemp->value());
+    if (m_mfCurOffA)    c.current_offset_a = float (m_mfCurOffA->value());
+    if (m_mfCurOffB)    c.current_offset_b = float (m_mfCurOffB->value());
+    if (m_mfCurOffC)    c.current_offset_c = float (m_mfCurOffC->value());
+    if (m_mfCurGainA)   c.current_gain_a   = float (m_mfCurGainA->value());
+    if (m_mfCurGainB)   c.current_gain_b   = float (m_mfCurGainB->value());
+    if (m_mfCurGainC)   c.current_gain_c   = float (m_mfCurGainC->value());
+    if (m_mfHallOffset) c.hall_offset      = float (m_mfHallOffset->value());
     return c;
 }
 

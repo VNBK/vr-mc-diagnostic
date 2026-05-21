@@ -52,11 +52,21 @@ signals:
     void disableRequested  (int idx);
     void quickStopRequested(int idx);
     void faultResetRequested(int idx);
+    /** Brake toggle. @p engaged = true → CiA-402 Halt bit set in cycle
+     *  controlword (motor freezes, stays in OPERATION_ENABLED). */
+    void brakeRequested    (int idx, bool engaged);
     void modeRequested     (int idx, vrmc::Mode mode);
     void targetRequested   (int idx, vrmc::TargetKind which, float value);
     /** Manual CiA-402 walk: send one explicit controlword via PDO,
      *  bypassing the cia402_master state machine. Debug aid only. */
     void walkControlwordRequested(int idx, uint16_t cw);
+    /** Open-loop V/f. @p engine 0 = FOC (mode 0x6060=-2 + 0x2031, needs
+     *  Enable), 1 = BSP raw generator (0x2032, auto-disables FOC). @p level
+     *  is volts (FOC) or per-unit amplitude (BSP). Start writes setpoint +
+     *  starts; live edits stream the setpoint; Stop halts that engine. */
+    void vfStartRequested  (int idx, int engine, double freqHz, double level);
+    void vfSetpointChanged (int idx, int engine, double freqHz, double level);
+    void vfStopRequested    (int idx, int engine);
 
 private slots:
     void emitTarget();
@@ -86,6 +96,17 @@ private:
     SlaveSnapshot  m_snap;            /**< cached snapshot of m_idx     */
     uint16_t       m_cwCached = 0;    /**< controlword master streams   */
     bool           m_hasSnap   = false;
+    /** Cache the last state-code we ran @ref refreshButtons against so
+     *  onSnapshots can skip rebuilding the enable/disable matrix when
+     *  nothing has changed. Without this, 30 Hz snapshots × ~20
+     *  setEnabled calls = sustained UI-thread paint thrash. */
+    int            m_lastBtnState = -2;
+    bool           m_lastBtnPdoFresh = false;
+    /** Cache for setStyleSheet gating on the state badge + error label.
+     *  setStyleSheet reparses CSS and triggers a polish event; calling
+     *  it every snapshot pegs the UI thread at the refresh rate. */
+    int            m_lastReadoutState   = -1;
+    bool           m_lastErrorVisible   = false;
 
     QLabel*        m_label        = nullptr;
     QLabel*        m_state        = nullptr;
@@ -96,10 +117,21 @@ private:
     QPushButton*   m_disable      = nullptr;
     QPushButton*   m_quickStop    = nullptr;
     QPushButton*   m_faultReset   = nullptr;
+    QPushButton*   m_brake        = nullptr;   /**< checkable, CiA-402 Halt */
     QComboBox*     m_modeCombo    = nullptr;
     QComboBox*     m_targetCombo  = nullptr;
     QDoubleSpinBox*m_valueSpin    = nullptr;
     QPushButton*   m_sendBtn      = nullptr;
+
+    /* Open-loop V/f group. m_vfLevel is volts (FOC) or per-unit (BSP); the
+     * label/range retitle on engine change. */
+    QComboBox*      m_vfEngine    = nullptr;
+    QDoubleSpinBox* m_vfFreq      = nullptr;
+    QDoubleSpinBox* m_vfLevel     = nullptr;
+    QLabel*         m_vfLevelLabel = nullptr;
+    QPushButton*    m_vfStart     = nullptr;
+    QPushButton*    m_vfStop      = nullptr;
+    bool            m_vfRunning   = false;
 
     /** Readout-strip checkbox: when checked, the tracking-error label
      *  prints Δq in degrees; otherwise in radians. Only affects

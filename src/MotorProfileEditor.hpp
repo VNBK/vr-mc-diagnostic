@@ -29,30 +29,30 @@ public:
     MotorParams params() const;
 
 private:
+    /* Rated torque is DERIVED (= Kt * rated current, Kt = 1.5*pole*flux) and
+     * shown read-only; recomputed live as pole/flux/rated-current change. */
+    void recomputeRatedTorque();
+
     /* Topology + pole pairs. */
     QComboBox*       m_type      = nullptr;
     QSpinBox*        m_polePair  = nullptr;
 
     /* Electrical. */
-    QDoubleSpinBox*  m_rs        = nullptr;
-    QDoubleSpinBox*  m_lsd       = nullptr;
-    QDoubleSpinBox*  m_lsq       = nullptr;
-    QDoubleSpinBox*  m_flux      = nullptr;
-    QDoubleSpinBox*  m_inertia   = nullptr;
+    QDoubleSpinBox*  m_rs         = nullptr;
+    QDoubleSpinBox*  m_lsd        = nullptr;
+    QDoubleSpinBox*  m_lsq        = nullptr;
+    QDoubleSpinBox*  m_flux       = nullptr;
+    QDoubleSpinBox*  m_inertia    = nullptr;
 
-    /* Speed. */
-    QSpinBox*        m_ratedSpd  = nullptr;
+    /* Ratings. */
+    QDoubleSpinBox*  m_ratedTrq   = nullptr;   /**< Nm  (0x6076)            */
+    QSpinBox*        m_ratedSpd   = nullptr;
+    QSpinBox*        m_ratedVol   = nullptr;
+    QSpinBox*        m_ratedCur   = nullptr;
 
-    /* Voltage limits. */
-    QSpinBox*        m_ratedVol  = nullptr;
-    QSpinBox*        m_minVol    = nullptr;
-    QSpinBox*        m_maxVol    = nullptr;
-
-    /* Current limits. */
-    QSpinBox*        m_ratedCur  = nullptr;
-    QSpinBox*        m_maxCur    = nullptr;
-    QSpinBox*        m_stallCur  = nullptr;
-    QSpinBox*        m_stallTime = nullptr;
+    /* Loaded params cached so non-widget fields (encoder resolution, now
+     * a Manufacturer/drive object) survive a round-trip through the form. */
+    MotorParams      m_cached;
 };
 
 }  // namespace vrmc

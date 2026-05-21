@@ -56,7 +56,7 @@ enum class CanKind {
 struct CanConfig
 {
     /* --- Transport selector --- */
-    CanKind  kind     = CanKind::Udp;
+    CanKind  kind     = CanKind::Zlg;
 
     /* --- UDP transport (hal_can_udp) --- */
     QString  group    = "239.192.0.42"; /**< UDP multicast group (matches drive). */
@@ -65,8 +65,8 @@ struct CanConfig
     /* --- ZLG USB-CANFD transport (hal_can_zlg) --- */
     QString  zlgLibPath  = "libcontrolcanfd.so"; /**< dlopen() target.   */
     uint32_t zlgChannel  = 0;                    /**< channel index 0/1. */
-    uint32_t zlgBitrate  = 1'000'000;            /**< arb-phase bps.     */
-    uint32_t zlgFdBitrate = 4'000'000;           /**< data-phase bps.    */
+    uint32_t zlgBitrate  =   500'000;            /**< arb-phase bps.     */
+    uint32_t zlgFdBitrate = 2'000'000;           /**< data-phase bps.    */
 
     /* --- UART-based transports (Feetech / Dynamixel) --- */
     QString  uartDevice  = "/dev/ttyUSB0";       /**< Serial port path.  */
@@ -107,6 +107,7 @@ public:
         int32_t  velocity   = 0;     /**< raw counts/s                   */
         int16_t  torque     = 0;     /**< per-mille of rated torque      */
         uint16_t error_code = 0;
+        int16_t  current    = 0;     /**< per-mille of rated current     */
         uint64_t rx_count   = 0;     /**< running PDO RX counter         */
         bool     fresh      = false; /**< true if any PDO yet seen       */
     };
@@ -134,27 +135,50 @@ public:
                 int32_t target_pos, int32_t target_vel,
                 int16_t target_torque);
 
-    /** @brief Arm the per-tick PDO keep-alive for a slot.
+    /** @brief Set the controlword the PDO cycle streams to a slot.
      *
-     *  Sets the cached controlword (typically @c 0x000F = Enable
-     *  Operation after a successful bring-up) and flips @c tx_active.
-     *  MasterWorker::onTick then streams the cached cw + targets at
-     *  the worker poll rate so the sim's RPDO-event adoption path
-     *  keeps firing. */
-    void armPdoTx(uint32_t idx, uint16_t controlword);
-
-    /** @brief Disarm the per-tick PDO keep-alive (e.g. on disable /
-     *  quick-stop / disconnect). Subsequent ticks skip this slot. */
-    void disarmPdoTx(uint32_t idx);
+     *  Every registered slot is always part of the cycle — the cycle
+     *  sends one RPDO per slot per period. This call just updates the
+     *  cached controlword the next RPDO carries:
+     *
+     *    - @c 0x0000 Disable Voltage     — unarmed / pre-bringup / post-disable
+     *    - @c 0x0006 Shutdown            — disable walk target
+     *    - @c 0x000F Enable Operation    — armed (post-bringup, motors hot)
+     *    - @c 0x0002 Quick Stop          — controlled decel
+     *    - @c 0x0080 Fault Reset         — rising edge to clear faults
+     *
+     *  Mirrors @c motor_drive_master.c's `cia402_slots[i].pdo.controlword`
+     *  cache. Safe to call from any thread (atomic store); the cycle
+     *  picks it up on the next period.
+     */
+    void setCycleControlword(uint32_t idx, uint16_t controlword);
 
     /** @brief Update a slot's cached PDO targets. Safe to call from
-     *  any thread; values are read by the next keep-alive tick. */
+     *  any thread; values are read by the next cycle period. */
     void setTarget(uint32_t idx, int32_t pos, int32_t vel, int16_t torque);
 
-    /** @brief Stream one keep-alive RPDO for each armed slot. Called
-     *  by MasterWorker each tick. No-op for slots with @c tx_active
-     *  false (bring-up not done, or disarmed). */
-    void pdoTick();
+    /** @brief Engage / release the Halt bit (controlword bit 8) for a
+     *  slot. Composed with the cached state-machine cw inside
+     *  @ref cycleStep so engaging Brake doesn't drop OPERATION_ENABLED.
+     *  When engaged, the slave decelerates per its mode (mode-specific
+     *  behavior; see CiA-402 §6.10.6) and holds zero motion. */
+    void setBrake(uint32_t idx, bool engaged);
+
+    /** @return current Brake state for a slot. */
+    bool brake(uint32_t idx) const;
+
+    /** @brief Run one period of the PDO cycle: send one RPDO per
+     *  registered slot using its cached controlword + targets.
+     *
+     *  Driven by a dedicated 1 kHz timer in @c MasterWorker. Matches
+     *  the SDK's `motor_drive_master.c:cycle_step` design — every
+     *  registered slot always gets an RPDO, regardless of CiA-402
+     *  state. The cached controlword determines what the slave sees;
+     *  unarmed slots stream @c 0x0000 which is a no-op for the FSM
+     *  but keeps the slave's frame-driven CAN main loop alive so its
+     *  SDO server stays responsive between bringup attempts.
+     */
+    void cycleStep();
 
     /** Number of slaves currently registered (for MasterWorker
      *  iteration). */

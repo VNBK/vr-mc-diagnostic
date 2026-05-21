@@ -16,10 +16,13 @@ ConnectionDialog::ConnectionDialog(QWidget* parent) : QDialog(parent)
 
     /* --- transport selector --- */
     m_transport = new QComboBox(this);
-    m_transport->addItem(tr("UDP multicast (loopback simulator)"),
-                         int(CanKind::Udp));
+    /* ZLG USB-CANFD first → default when the dialog opens. UDP
+     * loopback (Help → Start demo) is the second choice and stays
+     * easy to reach. */
     m_transport->addItem(tr("ZLG USB-CANFD (real hardware)"),
                          int(CanKind::Zlg));
+    m_transport->addItem(tr("UDP multicast (loopback simulator)"),
+                         int(CanKind::Udp));
     m_transport->addItem(tr("Feetech SMS/STS (RS-485 bus)"),
                          int(CanKind::Feetech));
     m_transport->addItem(tr("ROBOTIS Dynamixel (RS-485 bus)"),
@@ -43,10 +46,10 @@ ConnectionDialog::ConnectionDialog(QWidget* parent) : QDialog(parent)
     m_zlgChan->setValue(0);
     m_zlgArb  = new QSpinBox(m_zlgBox); m_zlgArb->setRange(50000, 1000000);
     m_zlgArb->setSuffix(tr(" bps"));    m_zlgArb->setSingleStep(50000);
-    m_zlgArb->setValue(1000000);
+    m_zlgArb->setValue(500000);
     m_zlgFd   = new QSpinBox(m_zlgBox); m_zlgFd->setRange(0, 8000000);
     m_zlgFd->setSuffix(tr(" bps"));     m_zlgFd->setSingleStep(500000);
-    m_zlgFd->setValue(4000000);
+    m_zlgFd->setValue(2000000);
     auto* zlgForm = new QFormLayout(m_zlgBox);
     zlgForm->addRow(tr("Channel"),          m_zlgChan);
     zlgForm->addRow(tr("Arb bitrate"),      m_zlgArb);

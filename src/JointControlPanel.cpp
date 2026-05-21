@@ -55,6 +55,8 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     m_disable     = new QPushButton(tr("Disable"),    this);
     m_quickStop   = new QPushButton(tr("Quick Stop"), this);
     m_faultReset  = new QPushButton(tr("Fault reset"),this);
+    m_brake       = new QPushButton(tr("Brake"),      this);
+    m_brake->setCheckable(true);
 
     /* Quick Stop is highlighted amber so it reads as "controlled stop"
      * — different from the red E-STOP in the top toolbar (which is the
@@ -63,11 +65,22 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
         "QPushButton { background-color: #d68000; color: white; font-weight: 600; }"
         "QPushButton:disabled { background-color: #5e3a00; color: #aaa; }"));
 
+    /* Brake reads as "held / not held"; checked = engaged (red border). */
+    m_brake->setStyleSheet(QStringLiteral(
+        "QPushButton:checked { background-color: #b03030; color: white; font-weight: 600; }"
+        "QPushButton:disabled { color: #888; }"));
+
     m_modeCombo = new QComboBox(this);
     m_modeCombo->addItem(tr("NONE"),     int(Mode::None));
     m_modeCombo->addItem(tr("TORQUE"),   int(Mode::Torque));
     m_modeCombo->addItem(tr("VELOCITY"), int(Mode::Velocity));
     m_modeCombo->addItem(tr("POSITION"), int(Mode::Position));
+    /* Default to POSITION — most common diagnostic workflow. Without
+     * this the combo defaults to NONE, the drive's 0x6060 never gets
+     * written when the user clicks Bringup, vmotor.mode stays at
+     * whatever leftover value it had, and Position setpoints don't
+     * actually steer the motor. */
+    m_modeCombo->setCurrentIndex(m_modeCombo->findData(int(Mode::Position)));
 
     m_targetCombo = new QComboBox(this);
     m_targetCombo->addItem(tr("Position (rad)"),   int(TargetKind::Position));
@@ -87,6 +100,7 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     powerRow->addWidget(m_disable);
     powerRow->addWidget(m_quickStop);
     powerRow->addWidget(m_faultReset);
+    powerRow->addWidget(m_brake);
     powerRow->addStretch();
 
     auto* modeBox = new QGroupBox(tr("Mode"), this);
@@ -346,18 +360,98 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
         if (m_idx >= 0) emit walkControlwordRequested(m_idx, 0x0000);
     });
 
+    /* Open-loop V/f. Two engines:
+     *   FOC (0)  -> mode 0x6060 = -2 + setpoint 0x2031; needs Enable (Start
+     *               handles it). BSP (1) -> raw bsp_vf via 0x2032; auto-
+     *               disables FOC. BOTH take a per-unit amplitude (modulation
+     *               depth of Vbus), so the level field is uniform. Engine
+     *               locked while running. */
+    m_vfEngine = new QComboBox(this);
+    m_vfEngine->addItem(tr("FOC (mode -2)"), 0);
+    m_vfEngine->addItem(tr("BSP generator"), 1);
+    m_vfFreq = new QDoubleSpinBox(this);
+    m_vfFreq->setRange(-1000.0, 1000.0);
+    m_vfFreq->setDecimals(2);
+    m_vfFreq->setSingleStep(1.0);
+    m_vfFreq->setSuffix(tr(" Hz"));
+    m_vfFreq->setToolTip(tr("Electrical frequency (signed; negative = reverse)."));
+    m_vfLevel = new QDoubleSpinBox(this);
+    m_vfLevel->setRange(0.0, 0.5);
+    m_vfLevel->setDecimals(3);
+    m_vfLevel->setSingleStep(0.01);
+    m_vfLevel->setSuffix(tr(" pu"));
+    m_vfLevel->setToolTip(tr("Amplitude — per-unit modulation depth of Vbus "
+                             "(≤ 0.4), same for both engines. Start small."));
+    m_vfLevelLabel = new QLabel(tr("Amp"), this);
+    m_vfStart = new QPushButton(tr("Start V/f"), this);
+    m_vfStop  = new QPushButton(tr("Stop"),      this);
+
+    auto* vfBox = new QGroupBox(tr("Open-loop V/f"), this);
+    {
+        auto* l = new QGridLayout(vfBox);
+        l->addWidget(new QLabel(tr("Engine"), vfBox), 0, 0);
+        l->addWidget(m_vfEngine,                       0, 1, 1, 3);
+        l->addWidget(new QLabel(tr("Freq"), vfBox),    1, 0);
+        l->addWidget(m_vfFreq,                          1, 1);
+        l->addWidget(m_vfLevelLabel,                    1, 2);
+        l->addWidget(m_vfLevel,                         1, 3);
+        l->addWidget(m_vfStart,                         2, 0, 1, 2);
+        l->addWidget(m_vfStop,                          2, 2, 1, 2);
+    }
+    connect(m_vfStart, &QPushButton::clicked, this, [this]{
+        if (m_idx < 0){ return; }
+        const int engine = m_vfEngine->currentData().toInt();
+        m_vfRunning = true;
+        m_vfEngine->setEnabled(false);                 /* lock engine while running */
+        /* FOC V/f needs OPERATION_ENABLED. Bring up FIRST (bringupOne walks
+         * the controlword only — it does NOT write 0x6060), THEN start V/f so
+         * mode -2 is written LAST and the mode combo can't clobber it.
+         * (Using the Bringup *button* instead would re-apply the combo mode
+         * and overwrite -2.) BSP needs no enable — it's the raw generator. */
+        if (engine == 0){
+            emit bringupRequested(m_idx, 2000);
+        }
+        emit vfStartRequested(m_idx, engine, m_vfFreq->value(), m_vfLevel->value());
+    });
+    connect(m_vfStop, &QPushButton::clicked, this, [this]{
+        if (m_idx < 0){ return; }
+        const int engine = m_vfEngine->currentData().toInt();
+        m_vfRunning = false;
+        m_vfEngine->setEnabled(true);
+        emit vfStopRequested(m_idx, engine);
+        if (engine == 0){ emit disableRequested(m_idx); }  /* undo the auto-enable */
+    });
+    auto vfLive = [this]{
+        if (m_vfRunning && m_idx >= 0){
+            emit vfSetpointChanged(m_idx, m_vfEngine->currentData().toInt(),
+                                   m_vfFreq->value(), m_vfLevel->value());
+        }
+    };
+    connect(m_vfFreq,  QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vfLive);
+    connect(m_vfLevel, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vfLive);
+
     auto* root = new QVBoxLayout(this);
     root->addWidget(m_label);
     root->addLayout(readoutRow);
     root->addLayout(readoutRow2);
     root->addLayout(powerRow);
+    root->addWidget(walkBox);     /* Manual CiA-402: below Bringup, above Mode */
     root->addWidget(modeBox);
     root->addWidget(tgtBox);
-    root->addWidget(walkBox);
+    root->addWidget(vfBox);
     root->addStretch();
 
     connect(m_bringup,    &QPushButton::clicked, this, [this]{
-        if (m_idx >= 0) emit bringupRequested(m_idx, 2000);
+        if (m_idx < 0){ return; }
+        /* Push the currently-selected mode to the slave first so 0x6060
+         * is set BEFORE the bringup walk takes the drive to
+         * OPERATION_ENABLED — many drives reject mode changes once in
+         * OP_EN, and vmotor.mode on the sim must be set or the
+         * setpoint won't actually steer the motor (default vmotor mode
+         * is NONE → motor coasts with stale omega). */
+        emit modeRequested(m_idx,
+            static_cast<Mode>(m_modeCombo->currentData().toInt()));
+        emit bringupRequested(m_idx, 2000);
     });
     connect(m_enable,     &QPushButton::clicked, this, [this]{
         if (m_idx >= 0) emit enableRequested(m_idx);
@@ -371,6 +465,12 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     connect(m_faultReset, &QPushButton::clicked, this, [this]{
         if (m_idx >= 0) emit faultResetRequested(m_idx);
     });
+    connect(m_brake, &QPushButton::toggled, this, [this](bool on){
+        if (m_idx >= 0){
+            emit brakeRequested(m_idx, on);
+            m_brake->setText(on ? tr("Brake (ON)") : tr("Brake"));
+        }
+    });
 
     setActiveSlave(-1);
 }
@@ -381,6 +481,17 @@ void JointControlPanel::setActiveSlave(int idx, const QString& name)
     m_hasSnap = false;
     m_snap = {};
     m_cwCached = 0;
+    /* Invalidate caches so the next snapshot rebuilds buttons + restyles
+     * the state badge for the newly-active slave. */
+    m_lastBtnState     = -2;
+    m_lastBtnPdoFresh  = false;
+    m_lastReadoutState = -1;
+    m_lastErrorVisible = false;
+    if (m_brake && m_brake->isChecked()){
+        QSignalBlocker block(m_brake);
+        m_brake->setChecked(false);
+        m_brake->setText(tr("Brake"));
+    }
     if (idx < 0){
         m_label->setText(tr("(select a slave above)"));
     } else {
@@ -398,7 +509,17 @@ void JointControlPanel::onSnapshots(const QVector<SlaveSnapshot>& snaps)
             m_snap    = s;
             m_hasSnap = true;
             refreshReadout();
-            refreshButtons();
+            /* Buttons only flip on state-machine transitions or first
+             * PDO freshness — gate refreshButtons on those edges to
+             * avoid 30 Hz × ~20 setEnabled calls thrashing the UI
+             * thread (the "lag after a while" backlog). */
+            const int  newState = stateCode(s.statusword);
+            const bool fresh    = s.pdoFresh;
+            if (newState != m_lastBtnState || fresh != m_lastBtnPdoFresh){
+                m_lastBtnState    = newState;
+                m_lastBtnPdoFresh = fresh;
+                refreshButtons();
+            }
             return;
         }
     }
@@ -706,21 +827,29 @@ void JointControlPanel::refreshReadout()
     if (m_hasSnap && m_snap.pdoFresh){
         const int code = stateCode(m_snap.statusword);
         const QString name = stateName(m_snap.statusword);
-        QString colour;
-        switch (code){
-        case 4:  colour = QStringLiteral("#1a6e1a"); break;  /* OPERATION_ENABLED — green */
-        case 5:  colour = QStringLiteral("#8a5a00"); break;  /* QUICK_STOP_ACTIVE — amber */
-        case 6:
-        case 7:  colour = QStringLiteral("#8a1a1a"); break;  /* FAULT* — red             */
-        default: colour = QStringLiteral("#222222"); break;
-        }
         m_state->setText(tr("state: %1").arg(name));
-        m_state->setStyleSheet(QStringLiteral("color: white; background-color: %1; "
-                                              "padding: 2px 8px; border-radius: 3px;")
-                               .arg(colour));
+        /* setStyleSheet only on state change — same UI-thread thrash
+         * fix as SlavePickerBar. */
+        if (code != m_lastReadoutState){
+            m_lastReadoutState = code;
+            QString colour;
+            switch (code){
+            case 4:  colour = QStringLiteral("#1a6e1a"); break;  /* OPERATION_ENABLED — green */
+            case 5:  colour = QStringLiteral("#8a5a00"); break;  /* QUICK_STOP_ACTIVE — amber */
+            case 6:
+            case 7:  colour = QStringLiteral("#8a1a1a"); break;  /* FAULT* — red             */
+            default: colour = QStringLiteral("#222222"); break;
+            }
+            m_state->setStyleSheet(QStringLiteral("color: white; background-color: %1; "
+                                                  "padding: 2px 8px; border-radius: 3px;")
+                                   .arg(colour));
+        }
     } else {
         m_state->setText(tr("state: (waiting for telemetry)"));
-        m_state->setStyleSheet(QString());
+        if (m_lastReadoutState != -1){
+            m_lastReadoutState = -1;
+            m_state->setStyleSheet(QString());
+        }
     }
 
     m_cwLabel  ->setText(tr("cw: 0x%1").arg(m_cwCached, 4, 16, QChar('0')));
@@ -728,14 +857,20 @@ void JointControlPanel::refreshReadout()
         m_modeCombo->currentText()));
 
     /* Error code label — appear only when non-zero. Red background for
-     * any reported error. */
-    if (m_hasSnap && m_snap.pdoFresh && m_snap.errorCode != 0){
-        m_errorLabel->setVisible(true);
+     * any reported error. setStyleSheet only on visibility transition;
+     * the text can update freely. */
+    const bool hasError = m_hasSnap && m_snap.pdoFresh && m_snap.errorCode != 0;
+    if (hasError){
         m_errorLabel->setText(tr("error: %1").arg(decodeErrorCode(m_snap.errorCode)));
-        m_errorLabel->setStyleSheet(QStringLiteral(
-            "color: white; background-color: #8a1a1a; "
-            "padding: 2px 8px; border-radius: 3px;"));
-    } else {
+        if (!m_lastErrorVisible){
+            m_lastErrorVisible = true;
+            m_errorLabel->setVisible(true);
+            m_errorLabel->setStyleSheet(QStringLiteral(
+                "color: white; background-color: #8a1a1a; "
+                "padding: 2px 8px; border-radius: 3px;"));
+        }
+    } else if (m_lastErrorVisible){
+        m_lastErrorVisible = false;
         m_errorLabel->setVisible(false);
     }
 
@@ -784,6 +919,7 @@ void JointControlPanel::refreshButtons()
                             static_cast<QWidget*>(m_disable),
                             static_cast<QWidget*>(m_quickStop),
                             static_cast<QWidget*>(m_faultReset),
+                            static_cast<QWidget*>(m_brake),
                             static_cast<QWidget*>(m_modeCombo),
                             static_cast<QWidget*>(m_targetCombo),
                             static_cast<QWidget*>(m_valueSpin),
@@ -816,6 +952,7 @@ void JointControlPanel::refreshButtons()
         m_disable   ->setEnabled(false);
         m_quickStop ->setEnabled(false);
         m_faultReset->setEnabled(false);
+        m_brake     ->setEnabled(false);
         m_modeCombo ->setEnabled(false);
         m_targetCombo->setEnabled(false);
         m_valueSpin ->setEnabled(false);
@@ -864,6 +1001,16 @@ void JointControlPanel::refreshButtons()
     m_quickStop->setEnabled(isOpEnabled);
     /* Fault Reset only applies in FAULT. */
     m_faultReset->setEnabled(isFault);
+    /* Brake (Halt bit) only meaningful while running. Auto-release
+     * the toggle if the drive leaves OPERATION_ENABLED so the button
+     * label / cached bit don't mis-represent reality after a Disable
+     * or Quick Stop. */
+    m_brake->setEnabled(isOpEnabled);
+    if (!isOpEnabled && m_brake->isChecked()){
+        QSignalBlocker block(m_brake);
+        m_brake->setChecked(false);
+        m_brake->setText(tr("Brake"));
+    }
     /* Mode + setpoint only useful when drive is enabled and tracking. */
     const bool canCommand = isOpEnabled;
     m_modeCombo  ->setEnabled(canCommand);

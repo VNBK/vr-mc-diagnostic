@@ -81,6 +81,12 @@ private:
     QLabel*      m_trqLbl     = nullptr;
     QLabel*      m_errLbl     = nullptr;
     QPushButton* m_expandBtn  = nullptr;
+
+    /** Last decoded state for the active slave. setStyleSheet is
+     *  expensive (CSS reparse + polish + repaint) — gating it on
+     *  state change keeps onSnapshots from thrashing the UI thread at
+     *  the refresh rate. -1 forces a paint on the first snapshot. */
+    int          m_lastStateCode = -1;
 };
 
 }  // namespace vrmc

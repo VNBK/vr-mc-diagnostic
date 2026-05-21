@@ -46,6 +46,7 @@
  */
 
 #include "cia402.h"
+#include "cia402/cia402_utils.h"
 #include "can_fd_pdo.h"
 #include "co_fd_usdo.h"
 #include "co_od.h"
@@ -132,6 +133,11 @@ typedef struct {
     double     target_vel_rad_s;
     double     target_trq_nm;
 
+    /* Open-loop V/f: when active the rotor follows the commanded mechanical
+     * speed exactly (sensorless). Set each tick from the 0x2031/0x2032 OD. */
+    bool       vf_active;
+    double     vf_omega_rad_s;
+
     /* Limits / shape — runtime-tunable from the shell. */
     double     max_vel;            /* |omega|       <= max_vel     */
     double     max_accel;          /* |dω/dt|       <= max_accel   */
@@ -161,6 +167,14 @@ static void vmotor_init(vmotor_t* v){
 }
 
 static void vmotor_step(vmotor_t* v){
+    if(v->vf_active){
+        /* Open-loop V/f: the rotor tracks the commanded frequency exactly,
+         * independent of CiA enable state (the BSP generator runs raw). */
+        v->omega_rad_s      = v->vf_omega_rad_s;
+        v->theta_rad       += v->omega_rad_s * v->dt;
+        v->torque_nm_actual = 0.0;
+        return;
+    }
     if(!v->enabled){
         /* Coast with mild damping when the drive is not in
          * OPERATION_ENABLED. Picks 0.999 per 10 kHz tick = ~10 s
@@ -202,6 +216,10 @@ static void vmotor_step(vmotor_t* v){
         torque_nm = v->target_trq_nm;
         const double accel = (torque_nm - v->load_torque_nm) / v->inertia_kgm2;
         v->omega_rad_s += accel * v->dt;
+        /* Viscous friction so target_torque=0 brings a spinning rotor
+         * to rest (real motors have bearing + cogging losses). Same
+         * decay constant as the disabled-coast branch. */
+        v->omega_rad_s *= 0.999;
         v->omega_rad_s  = vm_clamp(v->omega_rad_s, -v->max_vel, v->max_vel);
         break;
     }
@@ -226,27 +244,24 @@ static void vmotor_step(vmotor_t* v){
 
 
 // ========================================================================
-// Unit conversions:  motor (SI) <-> CiA 402 increments
+// Unit conversions:  motor (SI) <-> CiA 402 increments. Thin wrappers
+// that pin the sim's compile-time encoder resolution + rated torque
+// to the SDK's cia402_utils helpers. Drop these locals and call the
+// SDK directly once we expose per-slave scaling.
 // ========================================================================
 #define POS_COUNTS_PER_REV   (1u << POS_INC_BITS)
-#define INC_PER_RAD          ((double)POS_COUNTS_PER_REV / (2.0 * M_PI))
 
 static inline int32_t rad_to_inc(float rad){
-    return (int32_t)((double)rad * INC_PER_RAD);
+    return cia402_rad_to_inc(rad, POS_COUNTS_PER_REV);
 }
 static inline float inc_to_rad(int32_t inc){
-    return (float)((double)inc / INC_PER_RAD);
+    return cia402_inc_to_rad(inc, POS_COUNTS_PER_REV);
 }
-
-// Torque: CiA 402 units are 0.1% of rated (1000 = 100% rated).
 static inline int16_t nm_to_milli_rated(float nm){
-    int32_t v = (int32_t)((nm / RATED_TORQUE_NM) * 1000.0f);
-    if(v > 32767){ v = 32767; }
-    if(v < -32768){ v = -32768; }
-    return (int16_t)v;
+    return cia402_nm_to_milli_rated(nm, RATED_TORQUE_NM);
 }
 static inline float milli_rated_to_nm(int16_t v){
-    return ((float)v / 1000.0f) * RATED_TORQUE_NM;
+    return cia402_milli_rated_to_nm(v, RATED_TORQUE_NM);
 }
 
 
@@ -441,7 +456,7 @@ static void reconfigure_default_pdos(app_ctx_t* x, uint8_t new_node_id){
     co_tpdo_config_t tpdo_cfg = {
         .cob_id             = 0x180u + new_node_id,
         .trans_type         = CO_PDO_TX_ASYNC_MFR,
-        .data_len           = 14,
+        .data_len           = 16,
         .inhibit_time_100us = 0,
         .event_timer_ms     = 0,
     };
@@ -452,8 +467,9 @@ static void reconfigure_default_pdos(app_ctx_t* x, uint8_t new_node_id){
         { .od_index = 0x606C, .od_sub_index = 0, .bit_length = 32 },  // Velocity Actual
         { .od_index = 0x6077, .od_sub_index = 0, .bit_length = 16 },  // Torque Actual
         { .od_index = 0x603F, .od_sub_index = 0, .bit_length = 16 },  // Error Code
+        { .od_index = 0x6078, .od_sub_index = 0, .bit_length = 16 },  // Current Actual
     };
-    can_fd_tpdo_set_mapping(x->pdo, 0, tpdo_map, 5);
+    can_fd_tpdo_set_mapping(x->pdo, 0, tpdo_map, 6);
 }
 
 // Fires after an SDO download has written the new byte into g_app.node_id.
@@ -583,6 +599,29 @@ static void apply_cia402_targets(app_ctx_t* a){
     if(tt >  mt){ tt =  mt; }
     if(tt < -mt){ tt = -mt; }
 
+    /* CiA-402 §6.10.6 Halt (controlword bit 8). When set, motion stops
+     * per mode-specific semantics while the drive stays in
+     * OPERATION_ENABLED. Diagnostic's Brake button rides on this bit. */
+    const uint16_t cw = cia402_get_controlword(a->drive);
+    if (cw & 0x0100u){
+        switch ((cia402_mode_t)g_vmotor.mode){
+        case CIA402_MODE_CYCLIC_SYNC_POSITION:
+        case CIA402_MODE_PROFILE_POSITION:
+            tp = rad_to_inc((float)g_vmotor.theta_rad);
+            break;
+        case CIA402_MODE_CYCLIC_SYNC_VELOCITY:
+        case CIA402_MODE_PROFILE_VELOCITY:
+        case CIA402_MODE_VELOCITY:
+            tv_rad_s = 0.0f;
+            break;
+        case CIA402_MODE_CYCLIC_SYNC_TORQUE:
+        case CIA402_MODE_PROFILE_TORQUE:
+            tt = 0;
+            break;
+        default: break;
+        }
+    }
+
     g_vmotor.target_pos_rad   = (double)inc_to_rad(tp);
     g_vmotor.target_vel_rad_s = (double)tv_rad_s;
     g_vmotor.target_trq_nm    = (double)milli_rated_to_nm(tt);
@@ -592,6 +631,15 @@ static void apply_cia402_targets(app_ctx_t* a){
 // statusword / TxPDOs reflect simulator reality. Applies the home
 // offset (0x607C) and derives a stand-in current value for 0x6078.
 static void publish_motor_actuals(app_ctx_t* a){
+    /* 0x6076 rated torque is DERIVED (mirror the drive): Kt * rated current,
+     * Kt = 1.5 * pole_pairs * flux. In mNm this is just 1.5*pole*flux*mA
+     * (the /1000 A and *1000 mNm cancel). Recompute each tick so a profile /
+     * 0x6075 write is reflected in the read-only 0x6076. */
+    a->extra_od.motor_rated_torque_mNm = (uint32_t)(1.5f
+        * (float)a->extra_od.prof_pole_pair
+        * a->extra_od.prof_flux
+        * (float)a->extra_od.rated_current_mA);
+
     /* Home offset shifts the reported position toward the master.
      * Increments-domain subtract: pos_actual = theta_inc - home_offset. */
     int32_t pos_inc = rad_to_inc((float)g_vmotor.theta_rad)
@@ -600,14 +648,11 @@ static void publish_motor_actuals(app_ctx_t* a){
     cia402_set_velocity_actual(a->drive, rad_to_inc((float)g_vmotor.omega_rad_s));
     cia402_set_torque_actual  (a->drive, nm_to_milli_rated((float)g_vmotor.torque_nm_actual));
 
-    /* 0x6078 current actual, in mA. The simulator has no current loop;
-     * approximate from torque using a notional Kt so the master sees a
-     * physically-shaped reading. */
-    float i_amps = (float)g_vmotor.torque_nm_actual / VMOTOR_KT_NM_PER_A;
-    int32_t i_mA = (int32_t)(i_amps * 1000.0f);
-    if(i_mA >  32767){ i_mA =  32767; }
-    if(i_mA < -32768){ i_mA = -32768; }
-    a->extra_od.current_actual_mA = (int16_t)i_mA;
+    /* 0x6078 current actual = per-mille of rated current (CiA-402). The
+     * sim has no current loop; with a notional Kt the current per-mille
+     * equals the torque per-mille, so reuse that conversion. */
+    a->extra_od.current_actual_permille =
+        nm_to_milli_rated((float)g_vmotor.torque_nm_actual);
 }
 
 
@@ -615,7 +660,23 @@ static void publish_motor_actuals(app_ctx_t* a){
 // Control tick (10 kHz)
 // ========================================================================
 static void tick_motor_once(app_ctx_t* a){
-    (void)a;
+    /* Resolve open-loop V/f: rotor mech speed = 2*pi*f_elec / pole_pairs.
+     *   - BSP raw generator (0x2032 enable): runs regardless of CiA state.
+     *   - FOC mode -2 (0x2031 freq): only while OPERATION_ENABLED.
+     * Lets MotorView animate during a V/f demo (otherwise the rotor would
+     * just coast, since neither mode drives the kinematic model). */
+    double elec_hz = 0.0;
+    bool   vf      = false;
+    if(a->extra_od.vf_bsp_enable){
+        elec_hz = (double)a->extra_od.vf_bsp_freq_mhz / 1000.0;
+        vf = true;
+    } else if(g_vmotor.enabled && g_vmotor.mode == -2){
+        elec_hz = (double)a->extra_od.vf_freq_mhz / 1000.0;
+        vf = true;
+    }
+    const uint32_t pp = a->extra_od.prof_pole_pair ? a->extra_od.prof_pole_pair : 1u;
+    g_vmotor.vf_active      = vf;
+    g_vmotor.vf_omega_rad_s = vf ? (6.283185307179586 * elec_hz / (double)pp) : 0.0;
     vmotor_step(&g_vmotor);
 }
 
@@ -675,11 +736,11 @@ static void cmd_report(int argc, char** argv){
              g_vmotor.max_vel, g_vmotor.max_accel, g_vmotor.pos_kp);
     LOG_INFO(TAG, "vm physics J=%.2e kgm^2  load=%+6.3f Nm",
              g_vmotor.inertia_kgm2, g_vmotor.load_torque_nm);
-    LOG_INFO(TAG, "OD-ext  0x6072 max_torque=%u (per-mille rated)  0x6076 rated=%u uNm",
+    LOG_INFO(TAG, "OD-ext  0x6072 max_torque=%u (per-mille rated)  0x6076 rated=%u mNm",
              (unsigned)x->extra_od.max_torque,
-             (unsigned)x->extra_od.motor_rated_torque_uNm);
-    LOG_INFO(TAG, "OD-ext  0x6078 cur_actual=%d mA  0x607C home_offset=%d  0x6080 max_speed=%u rpm",
-             (int)x->extra_od.current_actual_mA,
+             (unsigned)x->extra_od.motor_rated_torque_mNm);
+    LOG_INFO(TAG, "OD-ext  0x6078 cur_actual=%d ‰  0x607C home_offset=%d  0x6080 max_speed=%u rpm",
+             (int)x->extra_od.current_actual_permille,
              (int)x->extra_od.home_offset,
              (unsigned)x->extra_od.max_motor_speed);
     LOG_INFO(TAG, "OD-ext  0x607D pos_limit min=%d max=%d",

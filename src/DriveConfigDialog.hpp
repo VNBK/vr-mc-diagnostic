@@ -2,11 +2,12 @@
  * @file   DriveConfigDialog.hpp
  * @brief  Tabbed editor for runtime-configurable drive parameters.
  *
- * Homing, motion profile, protection limits, and encoder scaling — the
- * CiA 402 OD entries that typically get tuned once per commissioning and
- * then stuck in flash. The dialog fills from @ref DriveConfig, edits in
- * place, and hands the result back to MainWindow which forwards it to
- * the worker for batch SDO I/O.
+ * Homing, motion profile, and protection limits — the CiA 402 OD entries
+ * that typically get tuned once per commissioning and then stuck in
+ * flash. The dialog fills from @ref DriveConfig, edits in place, and
+ * hands the result back to MainWindow which forwards it to the worker
+ * for batch SDO I/O. (Loop gains live on the Control Panel's Gains tab
+ * via the standard 0x60F6/0x60F9/0x60FB objects.)
  */
 
 #pragma once
@@ -21,6 +22,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
 
 namespace vrmc {
 
@@ -86,43 +88,50 @@ private:
     void buildHomingTab       (QWidget* host);
     void buildMotionTab       (QWidget* host);
     void buildProtectTab      (QWidget* host);
-    void buildEncoderTab      (QWidget* host);
     void buildManufacturerTab (QWidget* host);
     void buildCustomTab       (QWidget* host);
+    /** Walk every tab page and set its minimum size to the largest
+     *  sizeHint across all tabs. Forces QTabWidget::sizeHint to
+     *  reflect the widest tab's footprint, so adjustSize() can pick a
+     *  dialog size that fits every tab (not just the currently-shown
+     *  one). Called from ctor + showEvent. */
+    void fitTabsToLargest();
 
-    int     m_slaveIdx = -1;
-    QString m_slaveName;
-    QLabel* m_header = nullptr;
+    int          m_slaveIdx = -1;
+    QString      m_slaveName;
+    QLabel*      m_header = nullptr;
+    QTabWidget*  m_tabs   = nullptr;
 
-    /* Homing tab. */
-    QComboBox* m_homingMethod   = nullptr;
-    QSpinBox*  m_homeOffset     = nullptr;
-    QSpinBox*  m_homingFast     = nullptr;
-    QSpinBox*  m_homingSlow     = nullptr;
-    QSpinBox*  m_homingAccel    = nullptr;
+    /* Homing tab. Values shown in SI; converted to CiA wire units on R/W. */
+    QComboBox*      m_homingMethod   = nullptr;
+    QDoubleSpinBox* m_homeOffset     = nullptr;   /**< 0x607C  rad           */
+    QDoubleSpinBox* m_homingFast     = nullptr;   /**< 0x6099:1 rad/s        */
+    QDoubleSpinBox* m_homingSlow     = nullptr;   /**< 0x6099:2 rad/s        */
+    QDoubleSpinBox* m_homingAccel    = nullptr;   /**< 0x609A  rad/s²        */
 
     /* Motion profile. */
-    QSpinBox*  m_profileVel     = nullptr;
-    QSpinBox*  m_profileAccel   = nullptr;
-    QSpinBox*  m_profileDecel   = nullptr;
-    QSpinBox*  m_quickstopDecel = nullptr;
+    QDoubleSpinBox* m_profileVel     = nullptr;   /**< 0x6081  rad/s         */
+    QDoubleSpinBox* m_profileAccel   = nullptr;   /**< 0x6083  rad/s²        */
+    QDoubleSpinBox* m_profileDecel   = nullptr;   /**< 0x6084  rad/s²        */
+    QDoubleSpinBox* m_quickstopDecel = nullptr;   /**< 0x6085  rad/s²        */
 
     /* Protection. */
-    QSpinBox*  m_followingError = nullptr;
-    QSpinBox*  m_followingMs    = nullptr;
-    QSpinBox*  m_posMin         = nullptr;
-    QSpinBox*  m_posMax         = nullptr;
-    QSpinBox*  m_maxSpeed       = nullptr;
-    QSpinBox*  m_maxTorque      = nullptr;
-    QSpinBox*  m_ratedTorque    = nullptr;   /**< 0x6076 (mNm)            */
-    QLabel*    m_currentActual  = nullptr;   /**< 0x6078 read-only (‰)    */
+    QDoubleSpinBox* m_followingError = nullptr;   /**< 0x6065  rad           */
+    QSpinBox*       m_followingMs    = nullptr;   /**< 0x6066  ms (time)     */
+    QDoubleSpinBox* m_posMin         = nullptr;   /**< 0x607D:1 rad          */
+    QDoubleSpinBox* m_posMax         = nullptr;   /**< 0x607D:2 rad          */
+    QDoubleSpinBox* m_maxSpeed       = nullptr;   /**< 0x6080  rad/s         */
+    QDoubleSpinBox* m_maxTorque      = nullptr;   /**< 0x6072  Nm            */
+    QDoubleSpinBox* m_ratedTorque    = nullptr;   /**< 0x6076  Nm            */
+    QDoubleSpinBox* m_ratedCurrent   = nullptr;   /**< 0x6075  A             */
+    QSpinBox*       m_encInc         = nullptr;   /**< 0x608F:1 increments   */
+    QSpinBox*       m_encRevs        = nullptr;   /**< 0x608F:2 motor revs   */
+    QSpinBox*       m_stallCurrent   = nullptr;   /**< 0x2050:1 mA           */
+    QSpinBox*       m_stallTime      = nullptr;   /**< 0x2050:2 ms           */
 
-    /* Encoder. */
-    QSpinBox*  m_encRes         = nullptr;
-    QSpinBox*  m_gearNum        = nullptr;
-    QSpinBox*  m_gearDen        = nullptr;
-    QSpinBox*  m_feedNum        = nullptr;
-    QSpinBox*  m_feedDen        = nullptr;
+    /* Counts/rev (0x608F) cached from the last read; drives SI scaling.
+     * Falls back to 16384 until the drive reports it. */
+    double          m_countsPerRev   = 16384.0;
 
     QPushButton*      m_readBtn  = nullptr;
     QPushButton*      m_applyBtn = nullptr;
@@ -149,30 +158,14 @@ private:
     /* Manufacturer-range parameters (0x20xx). Parallel layout to the
      * DriveConfig struct's matching fields; setConfig/config round-
      * trips through them. Some drives may not expose all of these. */
-    QSpinBox*       m_mfNodeId       = nullptr;   /**< 0x2000:00 (u8) */
-    QDoubleSpinBox* m_mfCurKp        = nullptr;   /**< 0x2010:00      */
-    QDoubleSpinBox* m_mfCurKi        = nullptr;   /**< 0x2011:00      */
-    QDoubleSpinBox* m_mfVelKp        = nullptr;   /**< 0x2020:00      */
-    QDoubleSpinBox* m_mfVelKi        = nullptr;   /**< 0x2021:00      */
-    QDoubleSpinBox* m_mfPosKp        = nullptr;   /**< 0x2030:00      */
-    QDoubleSpinBox* m_mfPosKi        = nullptr;   /**< 0x2031:00      */
-    QSpinBox*       m_mfCurOffA      = nullptr;   /**< 0x2040:01 (i16)*/
-    QSpinBox*       m_mfCurOffB      = nullptr;   /**< 0x2040:02      */
-    QSpinBox*       m_mfCurOffC      = nullptr;   /**< 0x2040:03      */
-    QSpinBox*       m_mfCurGainA     = nullptr;   /**< 0x2041:01 (u16)*/
-    QSpinBox*       m_mfCurGainB     = nullptr;   /**< 0x2041:02      */
-    QSpinBox*       m_mfCurGainC     = nullptr;   /**< 0x2041:03      */
-    /* Fault thresholds — 0x2050:01..0A. */
-    QSpinBox*       m_mfFltOverCur     = nullptr; /**< :01 mA           */
-    QSpinBox*       m_mfFltOverLoad    = nullptr; /**< :02 % rated      */
-    QSpinBox*       m_mfFltOverLoadMs  = nullptr; /**< :03 ms           */
-    QSpinBox*       m_mfFltLossPhase   = nullptr; /**< :04 mA           */
-    QSpinBox*       m_mfFltLossPhaseMs = nullptr; /**< :05 ms           */
-    QSpinBox*       m_mfFltUnbalance   = nullptr; /**< :06 mA           */
-    QSpinBox*       m_mfFltStallMs     = nullptr; /**< :07 ms           */
-    QSpinBox*       m_mfFltOverVolt    = nullptr; /**< :08 mV           */
-    QSpinBox*       m_mfFltUnderVolt   = nullptr; /**< :09 mV           */
-    QSpinBox*       m_mfFltOverTemp    = nullptr; /**< :0A °C × 10      */
+    QSpinBox*       m_mfNodeId       = nullptr;   /**< 0x2000:01 (u8)      */
+    QDoubleSpinBox* m_mfCurOffA      = nullptr;   /**< 0x2040:01 (RW)      */
+    QDoubleSpinBox* m_mfCurOffB      = nullptr;   /**< 0x2040:02 (RW)      */
+    QDoubleSpinBox* m_mfCurOffC      = nullptr;   /**< 0x2040:03 (RW)      */
+    QDoubleSpinBox* m_mfCurGainA     = nullptr;   /**< 0x2041:01 (RW)      */
+    QDoubleSpinBox* m_mfCurGainB     = nullptr;   /**< 0x2041:02 (RW)      */
+    QDoubleSpinBox* m_mfCurGainC     = nullptr;   /**< 0x2041:03 (RW)      */
+    QDoubleSpinBox* m_mfHallOffset   = nullptr;   /**< 0x2060 rad          */
 };
 
 }  // namespace vrmc

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "backends/CanBackend.hpp"
+#include "MotorProfile.hpp"      /* MotorParams (writeMotorProfile) */
 
 #include <QHash>
 #include <QMutex>
@@ -103,67 +104,50 @@ struct DriveConfig
     uint32_t max_motor_speed    = 10000;
     uint16_t max_torque         = 2000;  /**< per-mille of rated  */
     uint32_t rated_torque       = 0;     /**< 0x6076, mNm                  */
+    uint32_t rated_current      = 0;     /**< 0x6075, mA                   */
 
-    /* Read-only telemetry (0x6078). Populated on Read; ignored on
-     * Write. Kept in the DriveConfig blob so dialogs can present a
-     * single snapshot. */
-    int16_t  current_actual     = 0;     /**< 0x6078, per-mille of rated I */
+    /* Position encoder resolution (0x608F record, like a gearbox):
+     * counts_per_rev = enc_increments / enc_motor_revs. RW; the
+     * diagnostic also uses it to scale inc <-> SI. */
+    uint32_t enc_increments     = 16384; /**< 0x608F:1                     */
+    uint32_t enc_motor_revs     = 1;     /**< 0x608F:2                     */
 
-    /* Encoder / scaling (0x608F:1 / 0x6091 / 0x6092). */
-    uint32_t enc_resolution     = 16384; /**< counts per rev       */
-    uint32_t gear_num           = 1;
-    uint32_t gear_den           = 1;
-    uint32_t feed_const_num     = 1;
-    uint32_t feed_const_den     = 1;
+    /* Protection (vendor 0x2050 record). Stall current crossing held for
+     * stall_time trips a fault. */
+    uint32_t stall_current      = 0;     /**< 0x2050:1 mA  */
+    uint32_t stall_time         = 0;     /**< 0x2050:2 ms  */
 
-    /* ---- Manufacturer-range parameters (0x20xx) --------------------
-     *
-     * Vendor-defined OD entries. Default index choices below assume a
-     * typical FOC drive layout; if your hardware uses different
-     * indices, override at the Custom-SDO tab or edit driveFields()
-     * in MasterWorker.cpp. All reads/writes go via the standard SDO
-     * helpers, so a slave that doesn't expose the index just abort
-     * with `0x06020000` and the read result is silently 0.
-     */
-    /* Node ID (vendor-defined; 0x2000:00, uint8). Change with care —
+    /* ---- Manufacturer-range parameters (0x20xx) -------------------- */
+    /* Node ID (vendor-defined; 0x2000:01, uint8). Change with care —
      * commits to the slave's NVM only after a save+reset. */
     uint8_t  node_id            = 0;
 
-    /* Per-loop manufacturer gain (parallel to CiA-402 standard via
-     * motor_drive_intf_get/set_gain; the Gains tab uses those, this
-     * tab uses vendor entries so you can compare or override). */
-    float    manuf_cur_kp       = 0.0f; /**< 0x2010:00 */
-    float    manuf_cur_ki       = 0.0f; /**< 0x2011:00 */
-    float    manuf_vel_kp       = 0.0f; /**< 0x2020:00 */
-    float    manuf_vel_ki       = 0.0f; /**< 0x2021:00 */
-    float    manuf_pos_kp       = 0.0f; /**< 0x2030:00 */
-    float    manuf_pos_ki       = 0.0f; /**< 0x2031:00 */
+    /* Per-phase current-sensor calibration (RW). Offsets 0x2040, gains
+     * 0x2041 (counts->A scale). */
+    float    current_offset_a   = 0.0f;  /**< 0x2040:1 */
+    float    current_offset_b   = 0.0f;  /**< 0x2040:2 */
+    float    current_offset_c   = 0.0f;  /**< 0x2040:3 */
+    float    current_gain_a     = 1.0f;  /**< 0x2041:1 */
+    float    current_gain_b     = 1.0f;  /**< 0x2041:2 */
+    float    current_gain_c     = 1.0f;  /**< 0x2041:3 */
 
-    /* Per-phase current-sensor calibration. Offsets are signed raw
-     * counts (zero-current ADC reading); gains are unsigned scale
-     * factors (ADC counts → Amperes). */
-    int16_t  current_offset_a   = 0;    /**< 0x2040:01 */
-    int16_t  current_offset_b   = 0;    /**< 0x2040:02 */
-    int16_t  current_offset_c   = 0;    /**< 0x2040:03 */
-    uint16_t current_gain_a     = 0;    /**< 0x2041:01 */
-    uint16_t current_gain_b     = 0;    /**< 0x2041:02 */
-    uint16_t current_gain_c     = 0;    /**< 0x2041:03 */
+    /* Hall commutation alignment offset (0x2060, rad). */
+    float    hall_offset        = 0.0f;  /**< 0x2060 */
+    /* Motor profile electrical record (0x2070) is written by the Motor
+     * Profile editor (writeMotorProfile), not this batch. */
+};
 
-    /* Fault thresholds (all under 0x2050:nn). The drive raises the
-     * matching latched-fault bit when the named signal crosses the
-     * threshold for the (optional) accompanying time window. Units
-     * follow the typical FOC-drive vendor convention noted on each
-     * field — adjust if your drive disagrees. */
-    uint32_t over_current        = 0;   /**< 0x2050:01  mA          */
-    uint16_t over_load           = 0;   /**< 0x2050:02  % of rated  */
-    uint32_t over_load_ms        = 0;   /**< 0x2050:03  ms          */
-    uint32_t current_loss_phase  = 0;   /**< 0x2050:04  mA threshold (phase missing) */
-    uint32_t current_loss_phase_ms = 0; /**< 0x2050:05  ms          */
-    uint32_t unbalance_current   = 0;   /**< 0x2050:06  mA delta    */
-    uint32_t stall_ms            = 0;   /**< 0x2050:07  ms (no motion under load) */
-    uint32_t over_voltage        = 0;   /**< 0x2050:08  mV          */
-    uint32_t under_voltage       = 0;   /**< 0x2050:09  mV          */
-    int16_t  over_temperature    = 0;   /**< 0x2050:0A  °C × 10     */
+/** Identity / device-info readout (CiA-301 0x1000/0x1008/9/A/0x1018). */
+struct DeviceInfo
+{
+    uint32_t device_type   = 0;   /**< 0x1000        */
+    QString  device_name;          /**< 0x1008        */
+    QString  hw_version;           /**< 0x1009        */
+    QString  sw_version;           /**< 0x100A        */
+    uint32_t vendor_id     = 0;   /**< 0x1018:01     */
+    uint32_t product_code  = 0;   /**< 0x1018:02     */
+    uint32_t revision      = 0;   /**< 0x1018:03     */
+    uint32_t serial        = 0;   /**< 0x1018:04     */
 };
 
 /** Signal-generator waveform. */
@@ -202,14 +186,36 @@ public slots:
      *  Different from disableOne (motors free) and from E-STOP
      *  (panic kill). */
     void quickStopOne(int idx);
-    /** Manual CiA-402 walk: stream one explicit controlword via PDO
-     *  (bypassing cia402_master). Re-arms tx_active so the value
-     *  sticks until the next walk step or normal action. Debug aid. */
+    /** Manual CiA-402 walk: latch an explicit controlword into the PDO
+     *  cycle cache (bypassing cia402_master). The cycle holds the value
+     *  on every subsequent RPDO until the next walk step or normal
+     *  action overwrites it. Debug aid. */
     void walkControlwordOne(int idx, uint16_t cw);
     void faultReset (int idx);
+    /** Brake (CiA-402 Halt bit). Engaged = controlword bit 8 set →
+     *  motor decelerates per its mode and holds zero motion; drive
+     *  stays in OPERATION_ENABLED. Released = bit 8 cleared → motor
+     *  resumes tracking the cached setpoint. */
+    void setBrake   (int idx, bool engaged);
     void setMode    (int idx, vrmc::Mode mode);
     void setTarget  (int idx, vrmc::TargetKind which, float value);
     void setId      (int idx, uint8_t newId);
+
+    /* Open-loop V/f. @p engine 0 = FOC (mode 0x6060=-2 + setpoint 0x2031:1
+     * freq [mHz] / :2 voltage [mV]; drive must be Enabled), 1 = BSP raw
+     * generator (0x2032:1 enable / :2 freq [mHz] / :3 amp [milli-pu]; the
+     * drive auto-disables FOC). @p level is volts (FOC) or per-unit (BSP).
+     * start writes setpoint + starts; setVfSetpoint streams it live;
+     * stop halts that engine. */
+    void startVfOpenLoop(int idx, int engine, double freqHz, double level);
+    void setVfSetpoint  (int idx, int engine, double freqHz, double level);
+    void stopVfOpenLoop (int idx, int engine);
+
+    /* Motor-profile-driven wire scaling. counts_per_rev (from 0x608F /
+     * the profile) converts position & velocity inc<->SI; rated torque
+     * (Nm) and rated current (A) convert the per-mille torque & current
+     * fields. Applied to every slave's control-panel targets + telemetry. */
+    void setScaling (double countsPerRev, double ratedNm, double ratedA);
 
     /* Emergency stop: disable every registered slave at once. */
     void disableAll ();
@@ -231,6 +237,16 @@ public slots:
      * they'll queue behind the periodic refresh. */
     void readDriveConfig (int idx);
     void writeDriveConfig(int idx, vrmc::DriveConfig cfg);
+
+    /** Write a motor profile to the drive: electrical record 0x2070:1..8
+     *  + rated torque (0x6076) + rated current (0x6075). Fired by the
+     *  Motor Profile editor's OK. */
+    void writeMotorProfile(int idx, vrmc::MotorParams mp);
+
+    /** Read CiA-301 identity objects (0x1000/0x1008/9/A/0x1018) and emit
+     *  @ref deviceInfoRead. Numeric fields are reliable; the strings are
+     *  best-effort (skipped if the drive doesn't expose them). */
+    void readDeviceInfo  (int idx);
 
     /** Kick off a CiA 402 homing sequence on a slave.
      *  Switches the drive into homing mode and pulses controlword bit 4
@@ -261,6 +277,8 @@ signals:
     void driveConfigRead   (int idx, vrmc::DriveConfig cfg, bool ok,
                             QString message);
     void driveConfigWritten(int idx, bool ok, QString message);
+    void deviceInfoRead    (int idx, vrmc::DeviceInfo info, bool ok,
+                            QString message);
     /** Encoder-zero / torque-tare completion with the raw value that was
      *  captured (and subsequently written). Dialog uses this to confirm
      *  the action rather than waiting on the next SDO refresh. */
@@ -288,17 +306,43 @@ public slots:
     void customSdoWrite(int slaveIdx, uint16_t odIdx, uint8_t sub, QByteArray bytes);
 
 private slots:
-    void onTick();                  /**< QTimer callback running refresh + pump */
+    void onTick();                  /**< UI refresh + cached PDO snapshot read */
+    void onCycleTick();             /**< PDO cycle: send 1 RPDO per slot     */
     void onGenTick();               /**< QTimer callback pushing waveform value */
 
 private:
     void teardown();
 
     CanBackend                  m_can;
-    master_mgr_t*               m_mgr   = nullptr;
-    QTimer*                     m_tick  = nullptr;
-    int                         m_hz    = 100;   /* PDO-driven; safe to raise */
-    int                         m_refreshTick = 0; /* SDO housekeeping divider */
+    master_mgr_t*               m_mgr      = nullptr;
+    /* Two-rate timers, matching motor_drive_master.c's split between
+     * cycle_run_loop (high-rate RPDO burst + transport pump) and the
+     * shell/UI (low-rate user interaction). The cycle timer holds the
+     * same mutex as bringup/disable/quick-stop so SDO walks never race
+     * with cached-controlword RPDOs. */
+    QTimer*                     m_tick     = nullptr;   /* UI refresh @ m_hz */
+    QTimer*                     m_cycle    = nullptr;   /* PDO cycle @ m_cycleHz */
+    /* Two-rate clock: PDO cycle pushed as high as the wire + vendor
+     * USB stack tolerate, UI refresh kept slow so the snapshot signal
+     * queue can never back up on the UI thread.
+     *
+     *   m_cycleHz = 1000  → 1 ms RPDO period.
+     *     Matches motor_drive_master --cycle 1000. Bode sweeps + step
+     *     response can analyse out to ~500 Hz. Per-slot wire load at
+     *     500 k arb / 2 M data ≈ 8 % bus, so 5+ slots still fit
+     *     comfortably. Vendor libcontrolcanfd USB poll thread sits at
+     *     ~20-25 % CPU on a typical laptop — that's the explicit
+     *     tradeoff for high cycle.
+     *
+     *   m_hz = 20         → 50 ms UI refresh period.
+     *     Decoupled from cycle so the snapshot signal (emitted via
+     *     QueuedConnection, never coalesced) doesn't pile up on the UI
+     *     thread regardless of how fast cycle runs. Buttons feel
+     *     instant; chart is OpenGL-accelerated so 9 series × 60 s
+     *     buffer paints in ~1 ms. */
+    int                         m_hz       = 20;
+    int                         m_cycleHz  = 1000;
+    int                         m_refreshTick = 0;      /* SDO housekeeping divider */
     mutable QMutex              m_mutex;
 
     /* Active generator state. Only one generator at a time for V1. */
@@ -311,6 +355,12 @@ private:
     struct CmdCache { float pos = 0.0f; float vel = 0.0f; float trq = 0.0f;
                       TargetKind last = TargetKind::Position; };
     QHash<int, CmdCache>        m_cmdCache;
+
+    /* Wire scaling (motor-profile-driven; see setScaling). Defaults match
+     * the board's 14-bit encoder + 0.5 Nm rated until a profile loads. */
+    uint32_t                    m_countsPerRev = 16384u;
+    float                       m_ratedNm      = 0.5f;
+    float                       m_ratedA       = 2.0f;
 };
 
 }  // namespace vrmc
@@ -325,3 +375,5 @@ Q_DECLARE_METATYPE(vrmc::GenCfg)
 Q_DECLARE_METATYPE(vrmc::CanBackend::PdoMapEntry)
 Q_DECLARE_METATYPE(QVector<vrmc::CanBackend::PdoMapEntry>)
 Q_DECLARE_METATYPE(vrmc::DriveConfig)
+Q_DECLARE_METATYPE(vrmc::DeviceInfo)
+Q_DECLARE_METATYPE(vrmc::MotorParams)

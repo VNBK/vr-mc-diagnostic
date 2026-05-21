@@ -85,6 +85,9 @@ private slots:
     void onFactoryReset();
     void onUploadFirmware();
     void onConfigureDrive();
+    void onDeviceInfo();
+    void onDeviceInfoResult(int idx, vrmc::DeviceInfo info, bool ok,
+                            QString message);
 
     /* Data menu. */
     void onToggleRecording(bool on);
@@ -114,6 +117,11 @@ private:
     void buildMenus();
     void buildToolbar();
     void wireWorker();
+
+    /** Push the active motor profile's wire scaling (counts/rev from
+     *  0x608F ratio + rated torque) to the worker so control-panel
+     *  targets and telemetry convert per-motor. */
+    void pushScalingToWorker();
 
     void notImplemented(const QString& feature);
 
@@ -177,6 +185,7 @@ private:
     QAction*          m_factoryResetAct   = nullptr;
     QAction*          m_uploadFirmwareAct = nullptr;
     QAction*          m_configureDriveAct = nullptr;
+    QAction*          m_deviceInfoAct     = nullptr;
 
     /* Modeless drive-config dialog, created on demand so it can sit
      * next to the main window while the operator tweaks values. */

@@ -106,6 +106,11 @@ PdoMappingView::PdoMappingView(QWidget* parent) : QWidget(parent)
     m_tpdoHeader->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_tpdo        = makeTable(m_tpdoEntries.size());
     auto* tpdoEditBtn = new QPushButton(tr("Edit…"), tpdoBox);
+    /* The board exposes 0x1800/0x1A00 read-only (live mirror of the
+     * active mapping); runtime remap over SDO is rejected, so editing is
+     * disabled. Re-enable if the board moves to read-write PDO config. */
+    tpdoEditBtn->setEnabled(false);
+    tpdoEditBtn->setToolTip(tr("PDO mapping is read-only on this drive"));
     connect(tpdoEditBtn, &QPushButton::clicked,
             this,        &PdoMappingView::onEditTpdo);
     {
@@ -123,6 +128,8 @@ PdoMappingView::PdoMappingView(QWidget* parent) : QWidget(parent)
     m_rpdoHeader->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_rpdo        = makeTable(m_rpdoEntries.size());
     auto* rpdoEditBtn = new QPushButton(tr("Edit…"), rpdoBox);
+    rpdoEditBtn->setEnabled(false);
+    rpdoEditBtn->setToolTip(tr("PDO mapping is read-only on this drive"));
     connect(rpdoEditBtn, &QPushButton::clicked,
             this,        &PdoMappingView::onEditRpdo);
     {

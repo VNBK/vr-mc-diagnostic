@@ -27,6 +27,9 @@ QT_FORWARD_DECLARE_CLASS(QChartView)
 QT_FORWARD_DECLARE_CLASS(QLineSeries)
 QT_FORWARD_DECLARE_CLASS(QValueAxis)
 QT_FORWARD_DECLARE_CLASS(QElapsedTimer)
+QT_FORWARD_DECLARE_CLASS(QPushButton)
+QT_FORWARD_DECLARE_CLASS(QScrollBar)
+QT_FORWARD_DECLARE_CLASS(QEvent)
 
 namespace vrmc {
 
@@ -39,11 +42,23 @@ public:
     void setActiveSlave(int idx);
     void clear();
 
+protected:
+    /** Intercept wheel + mouse-drag events on the chart view so the
+     *  operator can scroll through history. Auto-pauses on first
+     *  scroll/drag if the chart was running live. */
+    bool eventFilter(QObject* obj, QEvent* ev) override;
+
 public slots:
     void push(const QVector<vrmc::SlaveSnapshot>& snaps);
 
 private:
-    static constexpr int kWindowSec = 10;
+    /** Default visible X-axis window width on first show / resume. */
+    static constexpr double kWindowSecDefault = 10.0;
+    /** Zoom-in floor — too small and the chart is unreadable. */
+    static constexpr double kWindowSecMin     = 0.5;
+    /** Total ring-buffer depth — how far back the user can scroll once
+     *  the chart is paused. Also serves as the zoom-out ceiling. */
+    static constexpr double kBufferSec        = 60.0;
 
     enum class Group {
         Position = 0,
@@ -64,6 +79,9 @@ private:
     };
 
     void rescale();
+    /** Update the X-axis range from @c m_viewStart (paused) or follow
+     *  the latest sample (live). Also resizes scrollbar geometry. */
+    void refitView();
 
     int                 m_idx   = -1;
     QChart*             m_chart = nullptr;
@@ -71,6 +89,32 @@ private:
     QValueAxis*         m_axisY = nullptr;
     QElapsedTimer*      m_t0    = nullptr;
     QVector<Channel>    m_channels;
+
+    /* Capture controls. While @c m_paused is true the chart freezes
+     * but @c push() keeps appending to the buffer ring. The scrollbar
+     * is only enabled in this mode and lets the operator pan the
+     * visible window over the last @c kBufferSec of samples. */
+    QPushButton*        m_pauseBtn   = nullptr;
+    QScrollBar*         m_scrollBar  = nullptr;
+    QChartView*         m_view       = nullptr;
+    bool                m_paused     = false;
+    double              m_viewStart  = 0.0;   /**< left edge of visible window, sec */
+    double              m_latestT    = 0.0;   /**< time of most recent sample, sec  */
+    /** Width of the visible X window in seconds. Mutated by Ctrl+wheel
+     *  zoom; reset to @ref kWindowSecDefault on Resume + on clear(). */
+    double              m_windowSec  = kWindowSecDefault;
+
+    /* Mouse-drag pan state. m_dragStartPx is in QChartView viewport
+     * coordinates; m_dragStartView snapshots m_viewStart at the moment
+     * the drag begins so subsequent moves compute a stable delta. */
+    bool                m_dragging      = false;
+    double              m_dragStartPx   = 0.0;
+    double              m_dragStartView = 0.0;
+
+    /** Flip the chart into paused mode without re-emitting the button
+     *  toggled signal (used by mouse-pan handlers). No-op if already
+     *  paused. */
+    void enterPausedMode();
 };
 
 }  // namespace vrmc

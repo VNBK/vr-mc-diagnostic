@@ -78,6 +78,8 @@ int main(int argc, char** argv)
     qRegisterMetaType<QVector<vrmc::CanBackend::PdoMapEntry>>(
         "QVector<vrmc::CanBackend::PdoMapEntry>");
     qRegisterMetaType<vrmc::DriveConfig>("vrmc::DriveConfig");
+    qRegisterMetaType<vrmc::DeviceInfo>("vrmc::DeviceInfo");
+    qRegisterMetaType<vrmc::MotorParams>("vrmc::MotorParams");
 
     QCommandLineParser cli;
     cli.setApplicationDescription(QStringLiteral("VR Motor Control Diagnostic Tool"));

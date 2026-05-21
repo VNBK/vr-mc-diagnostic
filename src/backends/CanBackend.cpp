@@ -37,6 +37,7 @@ struct PdoSlot {
     int32_t                 velocity   = 0;   /* raw counts/s          */
     int16_t                 torque     = 0;   /* per-mille of rated    */
     uint16_t                error_code = 0;
+    int16_t                 current    = 0;   /* per-mille of rated I  */
     std::atomic<uint64_t>   rx_count{0};
     std::atomic<bool>       fresh{false};
 };
@@ -51,23 +52,30 @@ struct CanBackend::Slot
     char                   name[32]  = {};
     PdoSlot                pdo;
 
-    /* Per-slot PDO TX cache.
+    /* Per-slot PDO cycle cache.
      *
-     * Master-side controlword + target_{pos,vel,torque} are kept here
-     * so MasterWorker::onTick can stream a keep-alive RPDO every cycle
-     * — the sim adopts the OD targets only on RPDO arrival AND only
-     * when its CiA-402 state is OPERATION_ENABLED, so without the
-     * keep-alive the vmotor never moves even after the slider sends a
-     * setpoint via the SDO path. @c tx_active gates whether the
-     * keep-alive fires: stays @c false through the bring-up walk so
-     * we don't fight cia402_master writing 0x06 / 0x07 / 0x0F. Flipped
-     * to @c true by armPdoTx() after a successful bring-up, and back
-     * to @c false on disable / quick-stop. */
-    std::atomic<uint16_t>  tx_controlword{0};
+     * The PDO cycle (CanBackend::cycleStep, driven by a 1 kHz timer in
+     * MasterWorker) always sends one RPDO per registered slot per
+     * period. The cached @c cycle_controlword + targets are what the
+     * RPDO carries. Default after open() is @c cw=0x0000 (Disable
+     * Voltage — no-op for FSM, but keeps slave's CAN main loop ticking
+     * so its SDO server stays responsive). Bringup flips to @c 0x000F;
+     * disable to @c 0x0006; quick-stop to @c 0x0002; fault-reset to
+     * @c 0x0080 momentarily. Mutex-serialised against bringup/disable
+     * walks in MasterWorker so SDO writes never race with cached cw. */
+    std::atomic<uint16_t>  cycle_controlword{0};
     std::atomic<int32_t>   tx_target_pos{0};
     std::atomic<int32_t>   tx_target_vel{0};
     std::atomic<int16_t>   tx_target_torque{0};
-    std::atomic<bool>      tx_active{false};
+
+    /* Brake = controlword bit 8 (Halt). Stored separately from the
+     * cycle controlword so engaging Brake doesn't lose the state-machine
+     * bits (0-3, 7) — cycleStep OR's 0x0100 into the outgoing cw when
+     * this is true. From the slave's perspective: bit 8 set in mode 1
+     * (Profile Position) freezes motion; in mode 3 (Profile Velocity)
+     * decelerates with Quick-stop ramp; in mode 4 (Profile Torque) zero
+     * torque. Drive stays in OPERATION_ENABLED throughout. */
+    std::atomic<bool>      brake_engaged{false};
 };
 
 /* TPDO1 from the CiA 402 sim (slave -> master, COB-ID 0x180+id):
@@ -76,6 +84,7 @@ struct CanBackend::Slot
  *   [6..9]   velocity_actual  (int32)
  *   [10..11] torque_actual    (int16, per-mille of rated)
  *   [12..13] error_code       (uint16)
+ *   [14..15] current_actual   (int16, per-mille of rated, optional)
  * Layout copied from motor_drive_master.c's MASTER_PDO_TPDO_BYTES path.
  */
 static constexpr uint8_t kTPdoBytes = 14;
@@ -120,6 +129,9 @@ static void rpdoRx(uint32_t /*cob_id*/, const uint8_t* data,
     p->velocity   = static_cast<int32_t>(le32(data + 6));
     p->torque     = static_cast<int16_t>(le16(data + 10));
     p->error_code = le16(data + 12);
+    /* current_actual (0x6078) is appended at [14..15] when the drive's
+     * TPDO carries it (16-byte frame); older 14-byte frames lack it. */
+    p->current    = (len >= 16) ? static_cast<int16_t>(le16(data + 14)) : 0;
     p->rx_count.fetch_add(1, std::memory_order_relaxed);
     p->fresh.store(true, std::memory_order_release);
 }
@@ -411,24 +423,20 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
         }
     }
 
-    /* Probe every slave by waiting for at least one TPDO heartbeat
-     * before declaring Connect successful. Otherwise the diagnostic
-     * happily "connects" against an empty bus — sockets bind, PDO
-     * slots register, master_mgr accepts the slaves, but the slave
-     * side is silent. TPDO heartbeat probing works on any CiA-402
-     * conformant slave (statusword TPDO is emitted at least at the
-     * heartbeat rate, 10 Hz on cia402_drive_sim) without requiring
-     * any specific OD object — an earlier attempt at SDO probing
-     * 0x1000 (Device Type) misfired because the simulator's OD does
-     * not expose it. Wait up to kProbeTimeoutMs (~250 ms, well above
-     * the 100 ms heartbeat) and pump the transport in 5 ms slices so
-     * the RPDO callback can fire.
+    /* Probe phase: run the PDO cycle for ~250 ms and wait for every
+     * slave to emit at least one TPDO. Each cycleStep sends one RPDO
+     * per slot (cw=0x0000 from the cache, no-op for DS402) which on
+     * a frame-driven board firmware is what wakes the slave's main
+     * loop so it can pair a TPDO + start serving SDO. Mirrors what
+     * motor_drive_master.c's cycle_run_loop does from cycle 0 — no
+     * special probe code, just the normal cycle running.
      */
     {
         constexpr int kProbeTimeoutMs = 250;
         constexpr int kSliceMs        = 5;
         const int     slices          = kProbeTimeoutMs / kSliceMs;
         for (int s = 0; s < slices; ++s){
+            cycleStep();
             pump();
             bool all_seen = true;
             for (Slot* slot : m_slots){
@@ -445,9 +453,9 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
                 if (err){
                     *err = QStringLiteral(
                         "no slave responded at node %1 within %2 ms "
-                        "(no TPDO heartbeat). Check that the simulator/"
-                        "drive is running before Connect.")
-                        .arg(slot->node_id).arg(kProbeTimeoutMs);
+                        "(no TPDO after %3 RPDO cycles). Check that the "
+                        "drive is powered + on the correct bitrate.")
+                        .arg(slot->node_id).arg(kProbeTimeoutMs).arg(slices);
                 }
                 close();
                 return false;
@@ -508,7 +516,11 @@ void CanBackend::pump()
         if (m_canCli){ hal_can_udp_poll(m_canCli); }
         if (m_canPdo){ hal_can_udp_poll(m_canPdo); }
     } else if (m_kind == CanKind::Zlg){
-        if (m_canCli){ hal_can_zlg_poll(m_canCli); }
+        /* Both endpoints share the same physical ZLG channel via the
+         * SDK's refcounted (device, channel) tuple. hal_can_zlg_poll
+         * fans frames out to every endpoint registered on the channel,
+         * so a single poll drains for both — calling it twice just
+         * burns a ZCAN_GetReceiveNum round-trip on each idle queue. */
         if (m_canPdo){ hal_can_zlg_poll(m_canPdo); }
     }
     if (m_pdo)   { can_fd_pdo_process(m_pdo, /*dt_us=*/1000); }
@@ -653,6 +665,7 @@ bool CanBackend::getPdo(uint32_t idx, PdoFrame* out) const
     out->velocity   = slot->pdo.velocity;
     out->torque     = slot->pdo.torque;
     out->error_code = slot->pdo.error_code;
+    out->current    = slot->pdo.current;
     out->rx_count   = slot->pdo.rx_count.load(std::memory_order_relaxed);
     out->fresh      = true;
     return true;
@@ -676,18 +689,10 @@ int CanBackend::pdoSend(uint32_t idx, uint16_t controlword,
     return can_fd_tpdo_trigger(m_pdo, slot->pdo_slot);
 }
 
-void CanBackend::armPdoTx(uint32_t idx, uint16_t controlword)
+void CanBackend::setCycleControlword(uint32_t idx, uint16_t controlword)
 {
     if (idx >= m_slots.size()){ return; }
-    Slot* slot = m_slots[idx];
-    slot->tx_controlword.store(controlword, std::memory_order_release);
-    slot->tx_active     .store(true,         std::memory_order_release);
-}
-
-void CanBackend::disarmPdoTx(uint32_t idx)
-{
-    if (idx >= m_slots.size()){ return; }
-    m_slots[idx]->tx_active.store(false, std::memory_order_release);
+    m_slots[idx]->cycle_controlword.store(controlword, std::memory_order_release);
 }
 
 void CanBackend::setTarget(uint32_t idx, int32_t pos, int32_t vel, int16_t torque)
@@ -699,17 +704,31 @@ void CanBackend::setTarget(uint32_t idx, int32_t pos, int32_t vel, int16_t torqu
     slot->tx_target_torque.store(torque, std::memory_order_release);
 }
 
-void CanBackend::pdoTick()
+void CanBackend::cycleStep()
 {
     if (!m_pdo){ return; }
     for (Slot* slot : m_slots){
-        if (!slot->tx_active.load(std::memory_order_acquire)){ continue; }
-        (void)pdoSend(/*idx=*/static_cast<uint32_t>(slot->pdo_slot),
-                      slot->tx_controlword .load(std::memory_order_acquire),
-                      slot->tx_target_pos  .load(std::memory_order_acquire),
-                      slot->tx_target_vel  .load(std::memory_order_acquire),
+        uint16_t cw = slot->cycle_controlword.load(std::memory_order_acquire);
+        if (slot->brake_engaged.load(std::memory_order_acquire)){
+            cw |= 0x0100u;   /* CiA-402 controlword bit 8 = Halt */
+        }
+        (void)pdoSend(static_cast<uint32_t>(slot->pdo_slot), cw,
+                      slot->tx_target_pos   .load(std::memory_order_acquire),
+                      slot->tx_target_vel   .load(std::memory_order_acquire),
                       slot->tx_target_torque.load(std::memory_order_acquire));
     }
+}
+
+void CanBackend::setBrake(uint32_t idx, bool engaged)
+{
+    if (idx >= m_slots.size()){ return; }
+    m_slots[idx]->brake_engaged.store(engaged, std::memory_order_release);
+}
+
+bool CanBackend::brake(uint32_t idx) const
+{
+    if (idx >= m_slots.size()){ return false; }
+    return m_slots[idx]->brake_engaged.load(std::memory_order_acquire);
 }
 
 }  // namespace vrmc

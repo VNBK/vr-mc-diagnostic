@@ -8,28 +8,26 @@
  * rad/s, V, A) so they can be pushed straight into the SDK structs once
  * the diagnostic exposes a "write to drive" path.
  *
- * JSON schema (version 1):
+ * JSON schema (version 2):
  * @code
  *  {
- *    "version": 1,
+ *    "version": 2,
  *    "motor": {
- *      "type":           "PMSM",   // or "BLDC"
- *      "pole_pair":      4,
- *      "rs":             0.5,      // Ω
- *      "ls_d":           0.0015,   // H
- *      "ls_q":           0.0015,   // H
- *      "rated_flux":     0.05,     // Wb
- *      "inertia":        5.0e-5,   // kg·m²
- *      "rated_speed":    1000,     // rad/s (or rpm — see SDK)
- *      "rated_vol":      24,       // V
- *      "min_vol":        12,       // V
- *      "max_vol":        36,       // V
- *      "rated_cur":      2,        // A
- *      "max_cur":        6,        // A
- *      "stall_cur":      8,        // A
- *      "stall_time_cur": 1         // s
+ *      "type":            "PMSM",   // or "BLDC"
+ *      "pole_pair":       4,
+ *      "rs":              0.5,      // Ω
+ *      "ls_d":            0.0015,   // H
+ *      "ls_q":            0.0015,   // H
+ *      "rated_flux":      0.05,     // Wb
+ *      "inertia":         5.0e-5,   // kg·m²
+ *      "rated_torque":    0.5,      // Nm  (0x6076)
+ *      "rated_speed":     1000,     // rad/s (or rpm — see SDK)
+ *      "rated_vol":       24,       // V
+ *      "rated_cur":       2,        // A
+ *      "enc_increments":  16384,    // 0x608F:1
+ *      "enc_motor_revs":  1         // 0x608F:2  (counts/rev = inc / revs)
  *    },
- *    "connection": { ... }         // optional, same shape as before
+ *    "connection": { ... }          // optional, same shape as before
  *  }
  * @endcode
  */
@@ -45,7 +43,7 @@ namespace vrmc {
 /** @brief Motor topology — mirrors @c MOTOR_TYPE_BLDC / PMSM. */
 enum class MotorType { Bldc = 0, Pmsm = 1 };
 
-/** @brief Name-plate + electrical params (1:1 with @c motor_profile_t). */
+/** @brief Name-plate + electrical params. */
 struct MotorParams
 {
     MotorType type           = MotorType::Pmsm;
@@ -55,14 +53,15 @@ struct MotorParams
     float     ls_q           = 0.0015f;  /**< q-axis inductance, H          */
     float     rated_flux     = 0.05f;    /**< rotor PM flux λ_m, Wb         */
     float     inertia        = 5.0e-5f;  /**< rotor inertia J, kg·m²        */
+    float     rated_torque   = 0.5f;     /**< rated torque, Nm (0x6076)     */
     int       rated_speed    = 1000;     /**< name-plate rated speed        */
     int       rated_vol      = 24;       /**< rated DC-bus voltage, V       */
-    int       min_vol        = 12;       /**< undervoltage trip, V          */
-    int       max_vol        = 36;       /**< overvoltage trip, V           */
     int       rated_cur      = 2;        /**< rated phase current, A        */
-    int       max_cur        = 6;        /**< peak allowable phase cur, A   */
-    int       stall_cur      = 8;        /**< current considered "stall", A */
-    int       stall_time_cur = 1;        /**< time at stall_cur before trip */
+
+    /* Encoder resolution as a CiA-402 0x608F ratio (like a gearbox):
+     * counts_per_rev = enc_increments / enc_motor_revs. */
+    uint32_t  enc_increments = 16384;    /**< 0x608F:1 encoder increments   */
+    uint32_t  enc_motor_revs = 1;        /**< 0x608F:2 motor revolutions    */
 };
 
 struct MotorProfile

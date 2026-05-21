@@ -93,9 +93,11 @@ void SlavePickerBar::onComboChanged(int row)
     if (row < 0 || !m_model){
         m_currentRow = -1;
         m_currentIdx = -1;
+        m_lastStateCode = -1;     /* force restyle on next snapshot */
         return;
     }
     m_currentRow = row;
+    m_lastStateCode = -1;          /* new slave → force restyle      */
     /* Cache the slave's logical idx so onSnapshots can filter on it
      * without going back through the model. */
     if (m_model->rowCount() > row){
@@ -132,18 +134,25 @@ void SlavePickerBar::onSnapshots(const QVector<SlaveSnapshot>& snaps)
         const int code = stateCode(s.statusword);
         const QString name = s.pdoFresh ? stateName(s.statusword)
                                         : QStringLiteral("(no PDO)");
-        QString colour = QStringLiteral("#222222");
-        switch (code){
-        case 4:  colour = QStringLiteral("#1a6e1a"); break;   /* OP_ENABLED – green */
-        case 5:  colour = QStringLiteral("#8a5a00"); break;   /* QUICK_STOP – amber */
-        case 6:
-        case 7:  colour = QStringLiteral("#8a1a1a"); break;   /* FAULT – red        */
-        default: break;
-        }
         m_stateLbl->setText(QStringLiteral("● %1").arg(name));
-        m_stateLbl->setStyleSheet(QStringLiteral(
-            "QLabel { color: white; background-color: %1; "
-            "         padding: 2px 8px; border-radius: 3px; }").arg(colour));
+        /* setStyleSheet only on state-code change — it reparses CSS,
+         * re-polishes the widget, and schedules a repaint. Calling it
+         * 20+ times per second is what made the GUI lag accumulate
+         * even after the chart and button-gating fixes. */
+        if (code != m_lastStateCode){
+            m_lastStateCode = code;
+            QString colour = QStringLiteral("#222222");
+            switch (code){
+            case 4:  colour = QStringLiteral("#1a6e1a"); break;   /* OP_ENABLED – green */
+            case 5:  colour = QStringLiteral("#8a5a00"); break;   /* QUICK_STOP – amber */
+            case 6:
+            case 7:  colour = QStringLiteral("#8a1a1a"); break;   /* FAULT – red        */
+            default: break;
+            }
+            m_stateLbl->setStyleSheet(QStringLiteral(
+                "QLabel { color: white; background-color: %1; "
+                "         padding: 2px 8px; border-radius: 3px; }").arg(colour));
+        }
 
         m_posLbl->setText(QStringLiteral("q %1%2")
             .arg(s.position >= 0 ? QStringLiteral("+") : QString())

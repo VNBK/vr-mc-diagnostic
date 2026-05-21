@@ -172,6 +172,12 @@ void MainWindow::buildUi()
     m_pdoMapDock  = makeDock(tr("PDO map"),       QStringLiteral("PdoMapDock"),
                              m_pdoMap,      QSize(520, 520));
 
+    /* Left-column width shared between the top-row slave table and the
+     * bottom-row control panel — so their left edges align by default.
+     * QSplitter is interactive, so user drag will diverge them later;
+     * this just sets the initial geometry. */
+    constexpr int kLeftColumnPx = 420;
+
     /* Wrap each major pane in a QFrame so visual boundaries match the
      * functional grouping. Helper avoids hand-repeating the same
      * StyledPanel/Sunken/1-px line config. */
@@ -187,31 +193,88 @@ void MainWindow::buildUi()
         return f;
     };
 
-    /* Bottom row: framed Control-tabs on the left, telemetry chart on
-     * the right (TelemetryWidget already has its own internal frame). */
+    /* Bottom row: Control-tabs left, telemetry right. Left column
+     * width tracks the top row's slave-table column so the right edge
+     * of the table and the right edge of the control panel always
+     * align (sync wired below via splitterMoved). */
     auto* bottomSplit = new QSplitter(Qt::Horizontal);
     bottomSplit->addWidget(wrapFrame(m_leftTabs));
     bottomSplit->addWidget(m_telemetry);
     bottomSplit->setStretchFactor(0, 0);
     bottomSplit->setStretchFactor(1, 1);
+    bottomSplit->setSizes({kLeftColumnPx, 800});
 
     /* Top row: 3-pane horizontal split.
-     *   left   = slave list (the full table, always visible)
+     *   left   = slave list
      *   centre = MotorView dial
-     *   right  = motor profile view (toggleable from toolbar/View menu)
-     * Each wrapped in its own frame for clean visual grouping. The
-     * profile frame is captured so the toolbar toggle (built later
-     * in buildToolbar) can show/hide it. */
+     *   right  = motor profile view (narrow; togglable from toolbar) */
     m_motorView    = new MotorView;
     m_profileFrame = wrapFrame(m_profileView);
     auto* topSplit = new QSplitter(Qt::Horizontal);
     topSplit->addWidget(wrapFrame(m_table));
     topSplit->addWidget(wrapFrame(m_motorView));
     topSplit->addWidget(m_profileFrame);
-    topSplit->setStretchFactor(0, 1);
+    topSplit->setStretchFactor(0, 0);   /* table width follows kLeftColumnPx */
     topSplit->setStretchFactor(1, 1);
-    topSplit->setStretchFactor(2, 1);
-    topSplit->setSizes({320, 320, 320});
+    topSplit->setStretchFactor(2, 0);   /* profile stays narrow on resize */
+    topSplit->setSizes({kLeftColumnPx, 360, 300});
+
+    /* Sync the first-handle position between the two splitters so the
+     * right edge of slave table (topSplit's first pane) and the right
+     * edge of control panel (bottomSplit's first pane) align. Two-way:
+     * dragging either splitter's first handle moves the other. setSizes
+     * doesn't re-fire splitterMoved, so no recursion guard needed. */
+    connect(topSplit, &QSplitter::splitterMoved, this,
+            [topSplit, bottomSplit](int /*pos*/, int idx){
+        if (idx != 1){ return; }   /* only the table|motorView handle */
+        const auto tops = topSplit->sizes();
+        auto bots = bottomSplit->sizes();
+        if (tops.size() < 3 || bots.size() < 2){ return; }
+        const int total = bots[0] + bots[1];
+        bots[0] = tops[0];
+        bots[1] = std::max(0, total - tops[0]);
+        bottomSplit->setSizes(bots);
+    });
+    connect(bottomSplit, &QSplitter::splitterMoved, this,
+            [topSplit, bottomSplit](int /*pos*/, int idx){
+        if (idx != 1){ return; }
+        const auto bots = bottomSplit->sizes();
+        auto tops = topSplit->sizes();
+        if (tops.size() < 3 || bots.size() < 2){ return; }
+        const int delta = bots[0] - tops[0];
+        if (delta == 0){ return; }
+        tops[0] = bots[0];
+        /* Absorb the delta into the middle pane (MotorView). Clamp so
+         * it can't go below a sensible minimum. */
+        tops[1] = std::max(120, tops[1] - delta);
+        topSplit->setSizes(tops);
+    });
+
+    /* Defer initial alignment to next event loop iteration. setSizes
+     * called pre-show is clamped to whatever min-size hints the widgets
+     * report at construction time — by the time the window paints, the
+     * real widget hints are usually larger than what we asked for, so
+     * the right edges end up misaligned. Re-applying after show with
+     * the realised geometry locks both first panes to the max of the
+     * two natural widths so they line up. */
+    QTimer::singleShot(0, this, [topSplit, bottomSplit]{
+        if (topSplit->count() < 3 || bottomSplit->count() < 2){ return; }
+        const int wantLeft = std::max(
+            topSplit   ->widget(0)->sizeHint().width(),
+            bottomSplit->widget(0)->sizeHint().width());
+        auto tops = topSplit->sizes();
+        auto bots = bottomSplit->sizes();
+        const int topTotal = tops[0] + tops[1] + tops[2];
+        const int botTotal = bots[0] + bots[1];
+        const int profileW = std::max(260, tops[2]);   /* fit profile table */
+        tops[0] = wantLeft;
+        tops[2] = profileW;
+        tops[1] = std::max(120, topTotal - wantLeft - profileW);
+        bots[0] = wantLeft;
+        bots[1] = std::max(200, botTotal - wantLeft);
+        topSplit   ->setSizes(tops);
+        bottomSplit->setSizes(bots);
+    });
 
     /* Picker bar above everything — slim row with combo + state strip.
      * Expand-grid button hidden: the table is now a permanent member
@@ -400,12 +463,17 @@ void MainWindow::buildMenus()
         style->standardIcon(QStyle::SP_FileDialogDetailedView),
         tr("&Configure Drive…"), this);
     m_configureDriveAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
+    m_deviceInfoAct = new QAction(
+        style->standardIcon(QStyle::SP_MessageBoxInformation),
+        tr("Device &Info"), this);
     connect(m_saveToFlashAct,    &QAction::triggered, this, &MainWindow::onSaveConfigToFlash);
     connect(m_loadFromFlashAct,  &QAction::triggered, this, &MainWindow::onLoadConfigFromFlash);
     connect(m_factoryResetAct,   &QAction::triggered, this, &MainWindow::onFactoryReset);
     connect(m_uploadFirmwareAct, &QAction::triggered, this, &MainWindow::onUploadFirmware);
     connect(m_configureDriveAct, &QAction::triggered, this, &MainWindow::onConfigureDrive);
+    connect(m_deviceInfoAct,     &QAction::triggered, this, &MainWindow::onDeviceInfo);
     driveMenu->addAction(m_configureDriveAct);
+    driveMenu->addAction(m_deviceInfoAct);
     driveMenu->addSeparator();
     driveMenu->addAction(m_saveToFlashAct);
     driveMenu->addAction(m_loadFromFlashAct);
@@ -513,6 +581,31 @@ void MainWindow::buildToolbar()
     toolbar->addAction(tuningAct);
     toolbar->addAction(pdoMapAct);
     toolbar->addSeparator();
+    toolbar->addAction(m_deviceInfoAct);
+
+    /* Tint each toggle-view button's background to match its icon when
+     * checked, so the operator can see at-a-glance which panes are
+     * currently open. Without this, all three buttons look identical
+     * regardless of state — Qt's default checked indicator is too
+     * subtle on most desktop themes. Object-name lookup is the cheapest
+     * way to address individual QToolButtons via stylesheet. */
+    if (auto* btn = toolbar->widgetForAction(m_profileAct)){
+        btn->setObjectName(QStringLiteral("toggleProfileBtn"));
+    }
+    if (auto* btn = toolbar->widgetForAction(tuningAct)){
+        btn->setObjectName(QStringLiteral("toggleTuningBtn"));
+    }
+    if (auto* btn = toolbar->widgetForAction(pdoMapAct)){
+        btn->setObjectName(QStringLiteral("togglePdoMapBtn"));
+    }
+    toolbar->setStyleSheet(QStringLiteral(
+        "QToolButton#toggleProfileBtn:checked,"
+        "QToolButton#toggleTuningBtn:checked,"
+        "QToolButton#togglePdoMapBtn:checked { "
+        "  background: white; color: black; "
+        "  border: 1px solid #888; border-radius: 4px; }"
+    ));
+    toolbar->addSeparator();
 
     /* Drive group. Firmware-upgrade lives in the Drive menu only — the
      * toolbar slot was removed to keep the destructive flash dialog
@@ -588,6 +681,8 @@ void MainWindow::wireWorker()
             m_worker,  &MasterWorker::quickStopOne, Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::faultResetRequested,
             m_worker,  &MasterWorker::faultReset,   Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::brakeRequested,
+            m_worker,  &MasterWorker::setBrake,     Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::modeRequested,
             m_worker,  &MasterWorker::setMode,      Qt::QueuedConnection);
     connect(m_control, &JointControlPanel::targetRequested,
@@ -595,6 +690,12 @@ void MainWindow::wireWorker()
     connect(m_control, &JointControlPanel::walkControlwordRequested,
             m_worker,  &MasterWorker::walkControlwordOne,
             Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::vfStartRequested,
+            m_worker,  &MasterWorker::startVfOpenLoop, Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::vfSetpointChanged,
+            m_worker,  &MasterWorker::setVfSetpoint,   Qt::QueuedConnection);
+    connect(m_control, &JointControlPanel::vfStopRequested,
+            m_worker,  &MasterWorker::stopVfOpenLoop,  Qt::QueuedConnection);
     /* Push the master's cached controlword back to the panel so the
      * readout strip can mirror what's being streamed for the selected
      * slave. */
@@ -648,6 +749,7 @@ void MainWindow::wireWorker()
     connect(m_worker, &MasterWorker::error,        this, &MainWindow::onError);
     connect(m_worker, &MasterWorker::info,         this, &MainWindow::onInfo);
     connect(m_worker, &MasterWorker::snapshots,    this, &MainWindow::onSnapshots);
+    connect(m_worker, &MasterWorker::deviceInfoRead, this, &MainWindow::onDeviceInfoResult);
 }
 
 void MainWindow::onConnect()
@@ -669,6 +771,8 @@ void MainWindow::onConnected(int count)
     m_disconnectAct->setEnabled(true);
     m_reconnectAct->setEnabled(true);
     m_statusLabel->setText(tr("connected: %1 slave(s)").arg(count));
+    /* Re-assert the active profile's scaling on the fresh worker link. */
+    pushScalingToWorker();
 }
 
 void MainWindow::onDisconnected()
@@ -817,6 +921,7 @@ void MainWindow::onOpenProfile()
     m_motorParams = mp.motor;
     m_lastConfig  = mp.connection;
     m_profileView->setParams(m_motorParams);
+    pushScalingToWorker();
     m_log->appendInfo(tr("loaded profile %1 (schema v%2): "
                          "type=%3 pole_pair=%4 Rs=%5 Ls_d=%6 Ls_q=%7 "
                          "λ=%8 J=%9")
@@ -887,6 +992,46 @@ void MainWindow::onEditMotorProfile()
                           .arg(m_motorParams.ls_q, 0, 'g', 4)
                           .arg(m_motorParams.rated_flux, 0, 'g', 4)
                           .arg(m_motorParams.inertia,    0, 'g', 4));
+    pushScalingToWorker();
+
+    /* OK also writes the profile to the selected drive (0x2070 + rated
+     * torque/current) via SDO. No selection -> file/local update only. */
+    int sel = -1;
+    const auto rows = m_table->selectionModel()
+                          ? m_table->selectionModel()->selectedRows()
+                          : QModelIndexList{};
+    if (!rows.isEmpty()){
+        sel = m_model->index(rows.first().row(), SlaveTableModel::ColIdx)
+                  .data().toInt();
+    }
+    if (sel >= 0){
+        QMetaObject::invokeMethod(m_worker, "writeMotorProfile",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(int, sel),
+                                  Q_ARG(vrmc::MotorParams, m_motorParams));
+    } else {
+        m_log->appendInfo(tr("no slave selected — profile not written to a drive"));
+    }
+}
+
+void MainWindow::pushScalingToWorker()
+{
+    if (!m_worker){ return; }
+    const double cpr = (m_motorParams.enc_motor_revs != 0u)
+        ? double(m_motorParams.enc_increments) / double(m_motorParams.enc_motor_revs)
+        : 16384.0;
+    /* Rated torque is DERIVED (= Kt * rated current, Kt = 1.5*pole*flux), the
+     * same rule the drive uses for its read-only 0x6076. Compute it here so
+     * the telemetry/control torque scaling can never disagree with the drive,
+     * and refresh the cached value so the profile view stays consistent. */
+    const double kt      = 1.5 * double(m_motorParams.pole_pair)
+                               * double(m_motorParams.rated_flux);
+    const double ratedNm = kt * double(m_motorParams.rated_cur);
+    m_motorParams.rated_torque = static_cast<float>(ratedNm);
+    QMetaObject::invokeMethod(m_worker, "setScaling", Qt::QueuedConnection,
+                              Q_ARG(double, cpr),
+                              Q_ARG(double, ratedNm),
+                              Q_ARG(double, double(m_motorParams.rated_cur)));
 }
 
 /* ==================================================================== *
@@ -1040,6 +1185,65 @@ void MainWindow::onConfigureDrive()
     m_driveCfgDlg->activateWindow();
     /* Kick off a read so the form reflects what's on the drive. */
     emit m_driveCfgDlg->readRequested(idx);
+}
+
+void MainWindow::onDeviceInfo()
+{
+    int idx = -1;
+    const auto rows = m_table->selectionModel()
+                          ? m_table->selectionModel()->selectedRows()
+                          : QModelIndexList{};
+    if (!rows.isEmpty()){
+        idx = m_model->index(rows.first().row(), SlaveTableModel::ColIdx)
+                  .data().toInt();
+    }
+    if (idx < 0){
+        QMessageBox::information(this, tr("Device info"),
+            tr("Select a slave in the table first."));
+        return;
+    }
+    QMetaObject::invokeMethod(m_worker, "readDeviceInfo",
+                              Qt::QueuedConnection, Q_ARG(int, idx));
+}
+
+void MainWindow::onDeviceInfoResult(int idx, vrmc::DeviceInfo info, bool ok,
+                                    QString message)
+{
+    if (!ok){
+        QMessageBox::warning(this, tr("Device info"),
+            tr("Slave %1: no identity objects readable.\n%2")
+                .arg(idx).arg(message));
+        return;
+    }
+    const QString text =
+        tr("<b>Slave %1 — Identity</b><br><br>"
+           "Device type (0x1000): 0x%2<br>"
+           "Device name (0x1008): %3<br>"
+           "HW version (0x1009): %4<br>"
+           "SW version (0x100A): %5<br><br>"
+           "Vendor ID (0x1018:1): 0x%6<br>"
+           "Product code (0x1018:2): 0x%7<br>"
+           "Revision (0x1018:3): 0x%8<br>"
+           "Serial (0x1018:4): 0x%9")
+            .arg(idx)
+            .arg(info.device_type,  8, 16, QChar('0'))
+            .arg(info.device_name.isEmpty() ? tr("—") : info.device_name)
+            .arg(info.hw_version.isEmpty()  ? tr("—") : info.hw_version)
+            .arg(info.sw_version.isEmpty()  ? tr("—") : info.sw_version)
+            .arg(info.vendor_id,    8, 16, QChar('0'))
+            .arg(info.product_code, 8, 16, QChar('0'))
+            .arg(info.revision,     8, 16, QChar('0'))
+            .arg(info.serial,       8, 16, QChar('0'));
+
+    QMessageBox box(this);
+    box.setWindowTitle(tr("Device info"));
+    box.setTextFormat(Qt::RichText);
+    box.setText(text);
+    if (!message.isEmpty()){
+        box.setInformativeText(message);
+    }
+    box.setIcon(QMessageBox::Information);
+    box.exec();
 }
 
 /* ==================================================================== *

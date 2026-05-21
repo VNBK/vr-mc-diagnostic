@@ -9,7 +9,7 @@
 namespace vrmc {
 namespace profile {
 
-static constexpr int kSchemaVersion = 1;
+static constexpr int kSchemaVersion = 2;
 
 QString motorTypeToString(MotorType t)
 {
@@ -90,14 +90,12 @@ static QJsonObject encodeMotor(const MotorParams& m)
     obj[QStringLiteral("ls_q")]           = static_cast<double>(m.ls_q);
     obj[QStringLiteral("rated_flux")]     = static_cast<double>(m.rated_flux);
     obj[QStringLiteral("inertia")]        = static_cast<double>(m.inertia);
+    obj[QStringLiteral("rated_torque")]   = static_cast<double>(m.rated_torque);
     obj[QStringLiteral("rated_speed")]    = m.rated_speed;
     obj[QStringLiteral("rated_vol")]      = m.rated_vol;
-    obj[QStringLiteral("min_vol")]        = m.min_vol;
-    obj[QStringLiteral("max_vol")]        = m.max_vol;
     obj[QStringLiteral("rated_cur")]      = m.rated_cur;
-    obj[QStringLiteral("max_cur")]        = m.max_cur;
-    obj[QStringLiteral("stall_cur")]      = m.stall_cur;
-    obj[QStringLiteral("stall_time_cur")] = m.stall_time_cur;
+    obj[QStringLiteral("enc_increments")] = static_cast<qint64>(m.enc_increments);
+    obj[QStringLiteral("enc_motor_revs")] = static_cast<qint64>(m.enc_motor_revs);
     return obj;
 }
 
@@ -111,14 +109,12 @@ static void decodeMotor(const QJsonObject& obj, MotorParams& m)
     m.ls_q           = static_cast<float>(obj.value(QStringLiteral("ls_q")).toDouble(0.0015));
     m.rated_flux     = static_cast<float>(obj.value(QStringLiteral("rated_flux")).toDouble(0.05));
     m.inertia        = static_cast<float>(obj.value(QStringLiteral("inertia")).toDouble(5.0e-5));
+    m.rated_torque   = static_cast<float>(obj.value(QStringLiteral("rated_torque")).toDouble(0.5));
     m.rated_speed    = obj.value(QStringLiteral("rated_speed"))   .toInt(1000);
     m.rated_vol      = obj.value(QStringLiteral("rated_vol"))     .toInt(24);
-    m.min_vol        = obj.value(QStringLiteral("min_vol"))       .toInt(12);
-    m.max_vol        = obj.value(QStringLiteral("max_vol"))       .toInt(36);
     m.rated_cur      = obj.value(QStringLiteral("rated_cur"))     .toInt(2);
-    m.max_cur        = obj.value(QStringLiteral("max_cur"))       .toInt(6);
-    m.stall_cur      = obj.value(QStringLiteral("stall_cur"))     .toInt(8);
-    m.stall_time_cur = obj.value(QStringLiteral("stall_time_cur")).toInt(1);
+    m.enc_increments = static_cast<uint32_t>(obj.value(QStringLiteral("enc_increments")).toInt(16384));
+    m.enc_motor_revs = static_cast<uint32_t>(obj.value(QStringLiteral("enc_motor_revs")).toInt(1));
 }
 
 /* ------------------------------------------------------------------ *
