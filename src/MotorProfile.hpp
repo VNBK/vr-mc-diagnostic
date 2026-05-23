@@ -54,14 +54,21 @@ struct MotorParams
     float     rated_flux     = 0.05f;    /**< rotor PM flux λ_m, Wb         */
     float     inertia        = 5.0e-5f;  /**< rotor inertia J, kg·m²        */
     float     rated_torque   = 0.5f;     /**< rated torque, Nm (0x6076)     */
+    float     torque_constant = 0.0f;    /**< Kt, Nm/A (0x2070:9). 0 = drive
+                                          *   derives 1.5·pole·flux (PMSM).  */
     int       rated_speed    = 1000;     /**< name-plate rated speed        */
     int       rated_vol      = 24;       /**< rated DC-bus voltage, V       */
-    int       rated_cur      = 2;        /**< rated phase current, A        */
+    float     rated_cur      = 2.0f;     /**< rated phase current, A (float
+                                          *   for sub-amp motors). 0x6075 mA */
 
     /* Encoder resolution as a CiA-402 0x608F ratio (like a gearbox):
      * counts_per_rev = enc_increments / enc_motor_revs. */
     uint32_t  enc_increments = 16384;    /**< 0x608F:1 encoder increments   */
     uint32_t  enc_motor_revs = 1;        /**< 0x608F:2 motor revolutions    */
+
+    /* Incremental-encoder quadrature counts/rev (= 4 × lines), 0x2070:11.
+     * Only present on the encoder drive variant (3FL_2). */
+    uint32_t  cpr            = 4000;     /**< 0x2070:11 encoder CPR         */
 };
 
 struct MotorProfile

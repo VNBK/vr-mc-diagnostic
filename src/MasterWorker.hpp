@@ -243,6 +243,11 @@ public slots:
      *  Motor Profile editor's OK. */
     void writeMotorProfile(int idx, vrmc::MotorParams mp);
 
+    /** Read the motor profile back from the drive: 0x2070:1..10 (incl. Kt
+     *  :9 and encoder CPR :10) + rated current/torque (0x6075/0x6076).
+     *  Emits @ref motorProfileRead. CPR is best-effort (encoder variant only). */
+    void readMotorProfile(int idx);
+
     /** Read CiA-301 identity objects (0x1000/0x1008/9/A/0x1018) and emit
      *  @ref deviceInfoRead. Numeric fields are reliable; the strings are
      *  best-effort (skipped if the drive doesn't expose them). */
@@ -277,6 +282,10 @@ signals:
     void driveConfigRead   (int idx, vrmc::DriveConfig cfg, bool ok,
                             QString message);
     void driveConfigWritten(int idx, bool ok, QString message);
+    /** Result of @ref readMotorProfile: the slave's motor profile (incl.
+     *  Kt + CPR). Drives the Motor Profile editor/view's "load from slave". */
+    void motorProfileRead  (int idx, vrmc::MotorParams mp, bool ok,
+                            QString message);
     void deviceInfoRead    (int idx, vrmc::DeviceInfo info, bool ok,
                             QString message);
     /** Encoder-zero / torque-tare completion with the raw value that was

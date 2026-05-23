@@ -78,6 +78,9 @@ private slots:
     void onSaveProfile();
     void onSaveProfileAs();
     void onEditMotorProfile();
+    /** Result of MasterWorker::readMotorProfile — refresh the cached profile
+     *  + view from the slave, then open the editor if a read-to-edit is pending. */
+    void onMotorProfileRead(int idx, vrmc::MotorParams mp, bool ok, QString message);
 
     /* Drive menu. */
     void onSaveConfigToFlash();
@@ -122,6 +125,11 @@ private:
      *  0x608F ratio + rated torque) to the worker so control-panel
      *  targets and telemetry convert per-motor. */
     void pushScalingToWorker();
+
+    /** Open the modal motor-profile editor on the cached params + write the
+     *  result to the selected slave. Split from onEditMotorProfile so the
+     *  latter can read-from-slave first (see onMotorProfileRead). */
+    void openMotorProfileEditor();
 
     void notImplemented(const QString& feature);
 
@@ -208,6 +216,7 @@ private:
     QString                          m_currentProfilePath;
     vrmc::CanConfig                  m_lastConfig;
     vrmc::MotorParams                m_motorParams;       /**< loaded / edited */
+    bool                             m_profileEditPending = false; /**< read-then-open */
     QVector<vrmc::SlaveSnapshot>     m_latestSnaps;       /**< most recent refresh */
 };
 

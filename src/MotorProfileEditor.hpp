@@ -45,10 +45,14 @@ private:
     QDoubleSpinBox*  m_inertia    = nullptr;
 
     /* Ratings. */
+    QDoubleSpinBox*  m_torqueConst = nullptr;  /**< Kt Nm/A (0x2070:9); 0=derive */
     QDoubleSpinBox*  m_ratedTrq   = nullptr;   /**< Nm  (0x6076)            */
     QSpinBox*        m_ratedSpd   = nullptr;
     QSpinBox*        m_ratedVol   = nullptr;
-    QSpinBox*        m_ratedCur   = nullptr;
+    QDoubleSpinBox*  m_ratedCur   = nullptr;   /**< A (float; sub-amp ok)    */
+
+    /* Encoder. */
+    QSpinBox*        m_cpr        = nullptr;    /**< CPR = 4·lines (0x2070:11) */
 
     /* Loaded params cached so non-widget fields (encoder resolution, now
      * a Manufacturer/drive object) survive a round-trip through the form. */

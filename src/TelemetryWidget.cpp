@@ -225,6 +225,9 @@ TelemetryWidget::TelemetryWidget(QWidget* parent) : QWidget(parent)
 
 void TelemetryWidget::setActiveSlave(int idx)
 {
+    /* Only wipe the chart when the slave actually changes -- a redundant
+     * re-selection (UI refresh) must not disturb a paused/zoomed view. */
+    if (idx == m_idx){ return; }
     m_idx = idx;
     clear();
 }
@@ -244,7 +247,13 @@ void TelemetryWidget::clear()
         QSignalBlocker block(m_scrollBar);
         m_scrollBar->setRange(0, 0);
         m_scrollBar->setValue(0);
+        m_scrollBar->setEnabled(!m_paused ? false : m_scrollBar->isEnabled());
     }
+
+    /* Pause is a USER action and must persist: clear() resets the data/view
+     * but never the pause state. (Earlier this auto-resumed on every clear(),
+     * and since setActiveSlave() -> clear(), any slave re-selection silently
+     * un-paused the chart.) To resume, the operator clicks Resume. */
 }
 
 void TelemetryWidget::push(const QVector<SlaveSnapshot>& snaps)

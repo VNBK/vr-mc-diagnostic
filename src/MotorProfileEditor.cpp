@@ -68,6 +68,10 @@ MotorProfileEditor::MotorProfileEditor(QWidget* parent) : QDialog(parent)
     elecForm->addRow(tr("Rotor inertia J"),        m_inertia);
 
     /* Ratings --------------------------------------------------------- */
+    /* Torque constant Kt (0x2070:9). 0 -> the drive derives 1.5*pole*flux
+     * (PMSM); set explicitly for BLDC/trapezoidal motors. */
+    m_torqueConst = makeDouble(0.0, 0.001, 5, 0.0, 1000.0);
+    m_torqueConst->setSuffix(tr(" Nm/A"));
     m_ratedTrq = makeDouble(0.5, 0.01, 4, 0.0, 100000.0);
     m_ratedTrq->setSuffix(tr(" Nm"));
     /* Rated torque is DERIVED (= Kt * rated current) and read-only -- it
@@ -76,25 +80,35 @@ MotorProfileEditor::MotorProfileEditor(QWidget* parent) : QDialog(parent)
     m_ratedTrq->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_ratedSpd = makeInt(1000, 0, 100000, tr(" rad/s"));
     m_ratedVol = makeInt(24, 0, 1000, tr(" V"));
-    m_ratedCur = makeInt(2, 0, 1000, tr(" A"));
+    m_ratedCur = makeDouble(2.0, 0.01, 3, 0.0, 1000.0);   /* float A (sub-amp) */
+    m_ratedCur->setSuffix(tr(" A"));
 
     /* Keep the derived rated torque live as its inputs change. */
     connect(m_polePair, &QSpinBox::valueChanged,
             this, &MotorProfileEditor::recomputeRatedTorque);
-    connect(m_ratedCur, &QSpinBox::valueChanged,
+    connect(m_ratedCur, &QDoubleSpinBox::valueChanged,
             this, &MotorProfileEditor::recomputeRatedTorque);
     connect(m_flux, &QDoubleSpinBox::valueChanged,
+            this, &MotorProfileEditor::recomputeRatedTorque);
+    connect(m_torqueConst, &QDoubleSpinBox::valueChanged,
             this, &MotorProfileEditor::recomputeRatedTorque);
 
     auto* ratingBox  = new QGroupBox(tr("Ratings"), this);
     auto* ratingForm = new QFormLayout(ratingBox);
+    ratingForm->addRow(tr("Torque constant Kt (0 = derive)"), m_torqueConst);
     ratingForm->addRow(tr("Rated torque (derived = Kt·Irated)"), m_ratedTrq);
     ratingForm->addRow(tr("Rated speed"),           m_ratedSpd);
     ratingForm->addRow(tr("Rated voltage"),         m_ratedVol);
     ratingForm->addRow(tr("Rated current"),         m_ratedCur);
 
-    /* Encoder resolution lives on the Configure dialog's Manufacturer tab
-     * (drive object 0x608F), not in the motor name-plate profile. */
+    /* Encoder --------------------------------------------------------- */
+    /* Incremental-encoder quadrature counts/rev (= 4 × lines), drive
+     * object 0x2070:11 -- only present on the encoder variant (3FL_2). */
+    m_cpr = makeInt(4000, 1, 4000000, tr(" cnt/rev"));
+
+    auto* encBox  = new QGroupBox(tr("Encoder"), this);
+    auto* encForm = new QFormLayout(encBox);
+    encForm->addRow(tr("CPR (= 4 × lines, 0x2070:11)"), m_cpr);
 
     /* Buttons ---------------------------------------------------------- */
     auto* buttons = new QDialogButtonBox(
@@ -107,6 +121,7 @@ MotorProfileEditor::MotorProfileEditor(QWidget* parent) : QDialog(parent)
     root->addWidget(topoBox);
     root->addWidget(elecBox);
     root->addWidget(ratingBox);
+    root->addWidget(encBox);
     root->addWidget(buttons);
 }
 
@@ -125,9 +140,12 @@ void MotorProfileEditor::setParams(const MotorParams& mp)
     m_flux->setValue(mp.rated_flux);
     m_inertia->setValue(mp.inertia);
 
+    m_torqueConst->setValue(mp.torque_constant);
     m_ratedSpd->setValue(mp.rated_speed);
     m_ratedVol->setValue(mp.rated_vol);
     m_ratedCur->setValue(mp.rated_cur);
+
+    m_cpr->setValue(static_cast<int>(mp.cpr));
 
     /* Derived; ignore any stored value and recompute from the inputs. */
     recomputeRatedTorque();
@@ -135,8 +153,12 @@ void MotorProfileEditor::setParams(const MotorParams& mp)
 
 void MotorProfileEditor::recomputeRatedTorque()
 {
-    /* Kt = 1.5 * pole_pairs * flux ; rated torque = Kt * rated current. */
-    const double kt = 1.5 * double(m_polePair->value()) * m_flux->value();
+    /* Explicit Kt (0x2070:9) wins; 0 -> derive 1.5*pole*flux (PMSM). Mirrors
+     * the drive's motor_calc_Kt. rated torque = Kt * rated current. */
+    double kt = m_torqueConst->value();
+    if (kt <= 0.0){
+        kt = 1.5 * double(m_polePair->value()) * m_flux->value();
+    }
     m_ratedTrq->setValue(kt * double(m_ratedCur->value()));
 }
 
@@ -155,9 +177,11 @@ MotorParams MotorProfileEditor::params() const
     /* Derived (= Kt * rated current); store the shown value for the JSON
      * cache, but it is never written to the drive (0x6076 is read-only). */
     mp.rated_torque   = static_cast<float>(m_ratedTrq->value());
+    mp.torque_constant = static_cast<float>(m_torqueConst->value());
     mp.rated_speed    = m_ratedSpd->value();
     mp.rated_vol      = m_ratedVol->value();
-    mp.rated_cur      = m_ratedCur->value();
+    mp.rated_cur      = static_cast<float>(m_ratedCur->value());
+    mp.cpr            = static_cast<uint32_t>(m_cpr->value());
     return mp;
 }
 

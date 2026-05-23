@@ -290,6 +290,19 @@ void MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
         emit info(QStringLiteral("bringup slave %1 ok").arg(idx));
         m_can.setCycleControlword(static_cast<uint32_t>(idx), kCwEnableOperation);
         emit controlwordCached(idx, kCwEnableOperation);
+
+        /* Pin the telemetry current scale to the drive's ACTUAL rated current
+         * (0x6075, mA). 0x6078 streams per-mille of THIS value, so decoding it
+         * with a stale profile rated mis-scales the displayed amps -- badly so
+         * for sub-amp motors (e.g. board 0.43 A vs a 2 A default -> ~4.6x). Read
+         * it straight from the slave on bringup so the two can never disagree. */
+        uint32_t rcur_ma = 0U;
+        QString  rerr;
+        if (m_can.readSdo(idx, 0x6075, 0, &rcur_ma, 4, &rerr) == 0 && rcur_ma > 0U){
+            m_ratedA = static_cast<float>(rcur_ma) / 1000.0f;
+            emit info(QStringLiteral("slave %1 telemetry current scale <- 0x6075 = %2 A")
+                      .arg(idx).arg(double(m_ratedA), 0, 'g', 4));
+        }
     }
 }
 
@@ -875,7 +888,8 @@ void MasterWorker::writeMotorProfile(int idx, MotorParams mp)
     const uint32_t type = static_cast<uint32_t>(mp.type);
     const uint32_t pole = mp.pole_pair;
     const int32_t  rvol = mp.rated_vol;
-    const uint32_t rcur = static_cast<uint32_t>(mp.rated_cur) * 1000u;                  /* mA  */
+    const uint32_t rcur = static_cast<uint32_t>(std::lround(mp.rated_cur * 1000.0f));   /* mA  */
+    const int32_t  rspd = mp.rated_speed;                                               /* rpm */
 
     /* 0x6076 (rated torque) is NOT written: the drive derives it as
      * Kt * rated_current (Kt from flux/pole at 0x2070:2/6, rated current at
@@ -889,7 +903,23 @@ void MasterWorker::writeMotorProfile(int idx, MotorParams mp)
     wr(0x2070, 6, &mp.rated_flux, 4, QStringLiteral("0x2070:6"));
     wr(0x2070, 7, &mp.inertia,    4, QStringLiteral("0x2070:7"));
     wr(0x2070, 8, &rvol,          4, QStringLiteral("0x2070:8"));
-    wr(0x6075, 0, &rcur,          4, QStringLiteral("0x6075"));
+    /* 0x2070:9 torque constant Kt (Nm/A). 0 -> the drive derives it from
+     * pole/flux; non-zero overrides it (needed for BLDC). */
+    wr(0x2070, 9,  &mp.torque_constant, 4, QStringLiteral("0x2070:9"));
+    wr(0x2070, 10, &rspd,               4, QStringLiteral("0x2070:10"));  /* rated speed */
+    wr(0x6075, 0,  &rcur,               4, QStringLiteral("0x6075"));
+
+    /* 0x2070:11 encoder CPR (= 4*lines) exists only on the incremental-
+     * encoder variant (3FL_2); best-effort so it never fails the profile on
+     * Hall / abs-encoder nodes that don't expose the sub. */
+    {
+        const uint32_t cpr = mp.cpr;
+        QString e;
+        if (m_can.writeSdo(idx, 0x2070, 11, &cpr, 4, &e) != 0){
+            emit info(QStringLiteral("slave %1: 0x2070:11 (CPR) skipped — %2")
+                          .arg(idx).arg(e));
+        }
+    }
 
     if (fails.isEmpty()){
         emit info(QStringLiteral("motor profile written to slave %1").arg(idx));
@@ -897,6 +927,62 @@ void MasterWorker::writeMotorProfile(int idx, MotorParams mp)
         emit error(QStringLiteral("motor profile: slave %1 — failed: %2")
                        .arg(idx).arg(fails.join(QStringLiteral(", "))));
     }
+}
+
+void MasterWorker::readMotorProfile(int idx)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit motorProfileRead(idx, MotorParams{}, false,
+                              QStringLiteral("not connected"));
+        return;
+    }
+    MotorParams mp{};
+    QStringList fails;
+    auto rd = [&](uint16_t i, uint8_t s, void* p, uint32_t n, const QString& nm){
+        QString err;
+        if (m_can.readSdo(idx, i, s, p, n, &err) != 0){ fails << nm; return false; }
+        return true;
+    };
+
+    uint32_t type = 0, pole = 0;
+    int32_t  rvol = 0;
+    rd(0x2070, 1, &type,            4, QStringLiteral("0x2070:1"));
+    rd(0x2070, 2, &pole,            4, QStringLiteral("0x2070:2"));
+    rd(0x2070, 3, &mp.rs,           4, QStringLiteral("0x2070:3"));
+    rd(0x2070, 4, &mp.ls_d,         4, QStringLiteral("0x2070:4"));
+    rd(0x2070, 5, &mp.ls_q,         4, QStringLiteral("0x2070:5"));
+    rd(0x2070, 6, &mp.rated_flux,   4, QStringLiteral("0x2070:6"));
+    rd(0x2070, 7, &mp.inertia,      4, QStringLiteral("0x2070:7"));
+    rd(0x2070, 8, &rvol,            4, QStringLiteral("0x2070:8"));
+    rd(0x2070, 9,  &mp.torque_constant, 4, QStringLiteral("0x2070:9"));
+    int32_t rspd = 0;
+    rd(0x2070, 10, &rspd,            4, QStringLiteral("0x2070:10"));   /* rated speed */
+    mp.type        = (type == static_cast<uint32_t>(MotorType::Pmsm))
+                         ? MotorType::Pmsm : MotorType::Bldc;
+    mp.pole_pair   = pole;
+    mp.rated_vol   = rvol;
+    mp.rated_speed = rspd;
+
+    /* 0x2070:11 CPR only exists on the encoder variant (3FL_2); best-effort. */
+    { uint32_t cpr = 0; QString e;
+      if (m_can.readSdo(idx, 0x2070, 11, &cpr, 4, &e) == 0){ mp.cpr = cpr; } }
+
+    /* Rated current (0x6075, mA -> float A) + derived rated torque
+     * (0x6076, mNm -> Nm, RO). */
+    uint32_t rcur_ma = 0, rtrq_mnm = 0;
+    if (rd(0x6075, 0, &rcur_ma,  4, QStringLiteral("0x6075"))){
+        mp.rated_cur = static_cast<float>(rcur_ma) / 1000.0f;
+    }
+    if (rd(0x6076, 0, &rtrq_mnm, 4, QStringLiteral("0x6076"))){
+        mp.rated_torque = static_cast<float>(rtrq_mnm) / 1000.0f;
+    }
+
+    const bool ok = fails.isEmpty();
+    emit motorProfileRead(idx, mp, ok,
+        ok ? QStringLiteral("motor profile read from slave %1").arg(idx)
+           : QStringLiteral("motor profile read: slave %1 — failed: %2")
+                 .arg(idx).arg(fails.join(QStringLiteral(", "))));
 }
 
 void MasterWorker::readDeviceInfo(int idx)

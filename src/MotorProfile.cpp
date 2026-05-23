@@ -91,11 +91,13 @@ static QJsonObject encodeMotor(const MotorParams& m)
     obj[QStringLiteral("rated_flux")]     = static_cast<double>(m.rated_flux);
     obj[QStringLiteral("inertia")]        = static_cast<double>(m.inertia);
     obj[QStringLiteral("rated_torque")]   = static_cast<double>(m.rated_torque);
+    obj[QStringLiteral("torque_constant")] = static_cast<double>(m.torque_constant);
     obj[QStringLiteral("rated_speed")]    = m.rated_speed;
     obj[QStringLiteral("rated_vol")]      = m.rated_vol;
-    obj[QStringLiteral("rated_cur")]      = m.rated_cur;
+    obj[QStringLiteral("rated_cur")]      = static_cast<double>(m.rated_cur);
     obj[QStringLiteral("enc_increments")] = static_cast<qint64>(m.enc_increments);
     obj[QStringLiteral("enc_motor_revs")] = static_cast<qint64>(m.enc_motor_revs);
+    obj[QStringLiteral("cpr")]            = static_cast<qint64>(m.cpr);
     return obj;
 }
 
@@ -110,11 +112,13 @@ static void decodeMotor(const QJsonObject& obj, MotorParams& m)
     m.rated_flux     = static_cast<float>(obj.value(QStringLiteral("rated_flux")).toDouble(0.05));
     m.inertia        = static_cast<float>(obj.value(QStringLiteral("inertia")).toDouble(5.0e-5));
     m.rated_torque   = static_cast<float>(obj.value(QStringLiteral("rated_torque")).toDouble(0.5));
+    m.torque_constant = static_cast<float>(obj.value(QStringLiteral("torque_constant")).toDouble(0.0));
     m.rated_speed    = obj.value(QStringLiteral("rated_speed"))   .toInt(1000);
     m.rated_vol      = obj.value(QStringLiteral("rated_vol"))     .toInt(24);
-    m.rated_cur      = obj.value(QStringLiteral("rated_cur"))     .toInt(2);
+    m.rated_cur      = static_cast<float>(obj.value(QStringLiteral("rated_cur")).toDouble(2.0));
     m.enc_increments = static_cast<uint32_t>(obj.value(QStringLiteral("enc_increments")).toInt(16384));
     m.enc_motor_revs = static_cast<uint32_t>(obj.value(QStringLiteral("enc_motor_revs")).toInt(1));
+    m.cpr            = static_cast<uint32_t>(obj.value(QStringLiteral("cpr")).toInt(4000));
 }
 
 /* ------------------------------------------------------------------ *

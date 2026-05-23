@@ -750,6 +750,7 @@ void MainWindow::wireWorker()
     connect(m_worker, &MasterWorker::info,         this, &MainWindow::onInfo);
     connect(m_worker, &MasterWorker::snapshots,    this, &MainWindow::onSnapshots);
     connect(m_worker, &MasterWorker::deviceInfoRead, this, &MainWindow::onDeviceInfoResult);
+    connect(m_worker, &MasterWorker::motorProfileRead, this, &MainWindow::onMotorProfileRead);
 }
 
 void MainWindow::onConnect()
@@ -977,6 +978,52 @@ void MainWindow::onSaveProfileAs()
 }
 
 void MainWindow::onEditMotorProfile()
+{
+    /* Load the profile from the selected slave first, then open the editor on
+     * the fresh values. With no slave selected, edit the cached/JSON profile. */
+    int sel = -1;
+    {
+        const auto rows = m_table->selectionModel()
+                              ? m_table->selectionModel()->selectedRows()
+                              : QModelIndexList{};
+        if (!rows.isEmpty()){
+            sel = m_model->index(rows.first().row(), SlaveTableModel::ColIdx)
+                      .data().toInt();
+        }
+    }
+    if (sel >= 0 && m_worker){
+        m_profileEditPending = true;
+        m_log->appendInfo(tr("reading motor profile from slave %1…").arg(sel));
+        QMetaObject::invokeMethod(m_worker, "readMotorProfile",
+                                  Qt::QueuedConnection, Q_ARG(int, sel));
+        return;
+    }
+    openMotorProfileEditor();
+}
+
+void MainWindow::onMotorProfileRead(int idx, vrmc::MotorParams mp,
+                                    bool ok, QString message)
+{
+    Q_UNUSED(idx);
+    if (ok){
+        /* 0x2070 now carries the full name-plate (incl. Kt :9, rated speed
+         * :10, CPR :11) + rated current via 0x6075. The 0x608F encoder ratio
+         * isn't read here, so keep its cached value. */
+        mp.enc_increments = m_motorParams.enc_increments;
+        mp.enc_motor_revs = m_motorParams.enc_motor_revs;
+        m_motorParams = mp;
+        m_profileView->setParams(m_motorParams);
+        m_log->appendInfo(message);
+    } else {
+        m_log->appendError(message);
+    }
+    if (m_profileEditPending){
+        m_profileEditPending = false;
+        openMotorProfileEditor();
+    }
+}
+
+void MainWindow::openMotorProfileEditor()
 {
     MotorProfileEditor dlg(this);
     dlg.setParams(m_motorParams);
