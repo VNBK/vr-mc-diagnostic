@@ -46,7 +46,7 @@ enum class MotorType { Bldc = 0, Pmsm = 1 };
 /** @brief Name-plate + electrical params. */
 struct MotorParams
 {
-    MotorType type           = MotorType::Pmsm;
+    MotorType type           = MotorType::Bldc;
     uint32_t  pole_pair      = 4;
     float     rs             = 0.5f;     /**< stator phase resistance, Ω    */
     float     ls_d           = 0.0015f;  /**< d-axis inductance, H          */

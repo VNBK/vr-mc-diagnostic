@@ -20,6 +20,7 @@
 #include "SlaveTableModel.hpp"
 #include "TelemetryWidget.hpp"
 #include "TuningPane.hpp"
+#include "MotorProfile.hpp"
 
 #include <QAction>
 #include <QApplication>
@@ -1067,12 +1068,21 @@ void MainWindow::pushScalingToWorker()
     const double cpr = (m_motorParams.enc_motor_revs != 0u)
         ? double(m_motorParams.enc_increments) / double(m_motorParams.enc_motor_revs)
         : 16384.0;
-    /* Rated torque is DERIVED (= Kt * rated current, Kt = 1.5*pole*flux), the
-     * same rule the drive uses for its read-only 0x6076. Compute it here so
-     * the telemetry/control torque scaling can never disagree with the drive,
-     * and refresh the cached value so the profile view stays consistent. */
-    const double kt      = 1.5 * double(m_motorParams.pole_pair)
-                               * double(m_motorParams.rated_flux);
+    /* Rated torque is DERIVED (= Kt * rated current). Kt formula depends on
+     * MOTOR TYPE:
+     *   PMSM → analytic 1.5·pole·flux   (rotor-flux PMSM model).
+     *   BLDC → name-plate torque_constant (Nm/A) directly.
+     * Picking the wrong formula makes the 0x6071 target_torque (per-mille of
+     * rated_torque) round-trip wildly mis-scaled (e.g., BLDC profiles have
+     * rated_flux = 0 → 1.5·pole·flux = 0 → divide-by-zero / huge scaling). */
+    double kt = 0.0;
+    if (m_motorParams.type == MotorType::Pmsm){
+        kt = 1.5 * double(m_motorParams.pole_pair)
+                 * double(m_motorParams.rated_flux);
+    } else {
+        /* BLDC */
+        kt = double(m_motorParams.torque_constant);
+    }
     const double ratedNm = kt * double(m_motorParams.rated_cur);
     m_motorParams.rated_torque = static_cast<float>(ratedNm);
     QMetaObject::invokeMethod(m_worker, "setScaling", Qt::QueuedConnection,
