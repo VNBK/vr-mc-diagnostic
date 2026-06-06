@@ -82,6 +82,7 @@ add_executable(vr_mc_diagnostic
     src/JointControlPanel.hpp
     src/GainEditor.cpp
     src/GainEditor.hpp
+    src/BwFromKp.hpp
     src/SignalGeneratorPanel.cpp
     src/SignalGeneratorPanel.hpp
     src/TuningPane.cpp

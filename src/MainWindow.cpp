@@ -151,6 +151,7 @@ void MainWindow::buildUi()
     connect(m_profileView, &MotorProfileView::editRequested,
             this,          &MainWindow::onEditMotorProfile);
     m_profileView->setParams(m_motorParams);
+    pushProfileToTuning();
 
     /* Detachable panes. Created hidden + floating so the main window
      * comes up uncluttered; toolbar actions bring them out. The
@@ -708,8 +709,12 @@ void MainWindow::wireWorker()
             m_worker, &MasterWorker::readGain,   Qt::QueuedConnection);
     connect(m_gains,  &GainEditor::writeGainRequested,
             m_worker, &MasterWorker::writeGain,  Qt::QueuedConnection);
+    connect(m_gains,  &GainEditor::tuneGainRequested,
+            m_worker, &MasterWorker::tuneGain,   Qt::QueuedConnection);
     connect(m_worker, &MasterWorker::gainRead,
             m_gains,  &GainEditor::onGainRead);
+    connect(m_worker, &MasterWorker::gainTuned,
+            m_gains,  &GainEditor::onGainTuned);
 
     /* SignalGenerator -> worker + worker -> SignalGenerator. */
     connect(m_gen,    &SignalGeneratorPanel::startRequested,
@@ -739,6 +744,24 @@ void MainWindow::wireWorker()
             m_tuning->bode(), &BodeView::onGeneratorStarted);
     connect(m_worker, &MasterWorker::generatorStopped,
             m_tuning->bode(), &BodeView::onGeneratorStopped);
+
+    /* Auto-tune tab: tune + step capture via OD 0x2080. The tab listens
+     * to the same MasterWorker::gainTuned signal as the Gains tab, so
+     * either trigger updates both views' result fields. The readGain
+     * connection is what makes the Result Kp/Ki field repopulate when the
+     * dock is re-opened or the loop combo is changed. */
+    connect(m_tuning->autoTune(), &AutoTuneView::tuneRequested,
+            m_worker,             &MasterWorker::tuneGain,    Qt::QueuedConnection);
+    connect(m_tuning->autoTune(), &AutoTuneView::captureStepRequested,
+            m_worker,             &MasterWorker::captureStep, Qt::QueuedConnection);
+    connect(m_tuning->autoTune(), &AutoTuneView::readGainRequested,
+            m_worker,             &MasterWorker::readGain,    Qt::QueuedConnection);
+    connect(m_worker, &MasterWorker::gainTuned,
+            m_tuning->autoTune(), &AutoTuneView::onGainTuned);
+    connect(m_worker, &MasterWorker::stepCaptured,
+            m_tuning->autoTune(), &AutoTuneView::onStepCaptured);
+    connect(m_worker, &MasterWorker::gainRead,
+            m_tuning->autoTune(), &AutoTuneView::onGainRead);
 
     /* PDO mapping edit → SDO push. */
     connect(m_pdoMap, &PdoMappingView::applyRequested,
@@ -890,6 +913,17 @@ void MainWindow::onSelectionChanged()
     m_telemetry->setActiveSlave(idx);
     m_pdoMap->setActiveSlave(idx, nm);
     if (m_motorView){ m_motorView->setActiveSlave(idx, nm); }
+
+    /* Auto-reload the motor profile from the freshly-selected drive so
+     * reconnect (which clears + re-makes the selection) and per-row
+     * picks both refresh m_motorParams from the live board instead of
+     * showing the previous session's values. The Edit button path
+     * (onMotorProfileEditRequested) still uses the same readMotorProfile
+     * round-trip — the response handler is shared. */
+    if (m_worker && idx >= 0){
+        QMetaObject::invokeMethod(m_worker, "readMotorProfile",
+                                  Qt::QueuedConnection, Q_ARG(int, idx));
+    }
 }
 
 /* ==================================================================== *
@@ -924,6 +958,7 @@ void MainWindow::onOpenProfile()
     m_lastConfig  = mp.connection;
     m_profileView->setParams(m_motorParams);
     pushScalingToWorker();
+    pushProfileToTuning();
     m_log->appendInfo(tr("loaded profile %1 (schema v%2): "
                          "type=%3 pole_pair=%4 Rs=%5 Ls_d=%6 Ls_q=%7 "
                          "λ=%8 J=%9")
@@ -1014,6 +1049,13 @@ void MainWindow::onMotorProfileRead(int idx, vrmc::MotorParams mp,
         mp.enc_motor_revs = m_motorParams.enc_motor_revs;
         m_motorParams = mp;
         m_profileView->setParams(m_motorParams);
+        /* Keep the worker's CPR / Kt scaling in lock-step with whatever
+         * we just read off the drive -- signal-generator amplitude conversion
+         * and torque/velocity unit display both consume this. Without it
+         * the auto-read on reconnect would leave the worker on the
+         * previous session's scaling. */
+        pushScalingToWorker();
+        pushProfileToTuning();
         m_log->appendInfo(message);
     } else {
         m_log->appendError(message);
@@ -1031,6 +1073,7 @@ void MainWindow::openMotorProfileEditor()
     if (dlg.exec() != QDialog::Accepted){ return; }
     m_motorParams = dlg.params();
     m_profileView->setParams(m_motorParams);
+    pushProfileToTuning();
     m_log->appendInfo(tr("motor profile updated: type=%1 pole_pair=%2 "
                          "Rs=%3Ω Ls_d=%4H Ls_q=%5H λ=%6Wb J=%7kg·m²")
                           .arg(profile::motorTypeToString(m_motorParams.type))
@@ -1059,6 +1102,17 @@ void MainWindow::openMotorProfileEditor()
                                   Q_ARG(vrmc::MotorParams, m_motorParams));
     } else {
         m_log->appendInfo(tr("no slave selected — profile not written to a drive"));
+    }
+}
+
+void MainWindow::pushProfileToTuning()
+{
+    /* Both surfaces back-compute BW = f(Kp, profile) on every gain read /
+     * tune callback; they cache the params locally so the recompute
+     * doesn't race a pending SDO round-trip. */
+    if (m_gains){ m_gains->setMotorParams(m_motorParams); }
+    if (m_tuning && m_tuning->autoTune()){
+        m_tuning->autoTune()->setMotorParams(m_motorParams);
     }
 }
 

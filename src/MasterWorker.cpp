@@ -497,29 +497,32 @@ void MasterWorker::setScaling(double countsPerRev, double ratedNm, double ratedA
                   .arg(m_ratedA, 0, 'g', 4));
 }
 
-/* --- Open-loop V/f (manufacturer mode -2 + vendor setpoint 0x2031) ---- */
+/* --- Open-loop V/f (unified vendor 0x2030 -- type + freq + amp) ------- *
+ *
+ * Layout (board side, app_mfr_od.h):
+ *   :01 type  UINT8  (0 = disable, 1 = BSP raw-gen, 2 = FOC mode -2)
+ *   :02 freq  INT32  (electrical mHz)
+ *   :03 amp   UINT32 (milli-pu of Vbus)
+ *
+ * For FOC type=2 the board doesn't engage the cascade until 0x6060 == -2
+ * is also written; the type byte just selects which engine consumes the
+ * freq/amp pair. For BSP type=1 the write hook fires bsp_vf_arm + set
+ * directly. Disable (type=0) disarms BSP and idles the FOC path. */
 
-/* engine: 0 = FOC (0x6060=-2 + 0x2031), 1 = BSP raw generator (0x2032). */
 void MasterWorker::setVfSetpoint(int idx, int engine, double freqHz, double level)
 {
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ return; }
     const double lv = (level < 0.0) ? 0.0 : level;
-    int32_t  fmhz = static_cast<int32_t>(std::lround(freqHz * 1000.0));   /* mHz */
+    int32_t  fmhz   = static_cast<int32_t>(std::lround(freqHz * 1000.0));
+    uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
     QString  err;
-    int rc;
-    if (engine == 1){            /* BSP: 0x2032:2 freq, :3 amp (milli-pu) */
-        uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
-        rc = (m_can.writeSdo(idx, 0x2032, 2, &fmhz,   4, &err) != 0 ||
-              m_can.writeSdo(idx, 0x2032, 3, &amilli, 4, &err) != 0) ? -1 : 0;
-    } else {                     /* FOC: 0x2031:1 freq, :2 amplitude (milli-pu) */
-        uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
-        rc = (m_can.writeSdo(idx, 0x2031, 1, &fmhz,   4, &err) != 0 ||
-              m_can.writeSdo(idx, 0x2031, 2, &amilli, 4, &err) != 0) ? -1 : 0;
-    }
+    int rc = (m_can.writeSdo(idx, 0x2030, 2, &fmhz,   4, &err) != 0 ||
+              m_can.writeSdo(idx, 0x2030, 3, &amilli, 4, &err) != 0) ? -1 : 0;
     if (rc != 0){
         emit error(QStringLiteral("V/f setpoint slave %1 — %2").arg(idx).arg(err));
     }
+    (void)engine;   /* freq/amp shared; engine still chosen by type at start time */
 }
 
 void MasterWorker::startVfOpenLoop(int idx, int engine, double freqHz, double level)
@@ -527,34 +530,34 @@ void MasterWorker::startVfOpenLoop(int idx, int engine, double freqHz, double le
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ emit error(QStringLiteral("start V/f: not connected")); return; }
     const double lv = (level < 0.0) ? 0.0 : level;
-    int32_t  fmhz = static_cast<int32_t>(std::lround(freqHz * 1000.0));
+    int32_t  fmhz   = static_cast<int32_t>(std::lround(freqHz * 1000.0));
+    uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
     QString  err;
     if (engine == 1){
-        /* BSP raw generator: write setpoint, then enable. The drive
-         * auto-disables FOC; no 0x6040 Enable needed. */
-        uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
-        uint32_t en     = 1u;
-        if (m_can.writeSdo(idx, 0x2032, 2, &fmhz,   4, &err) != 0 ||
-            m_can.writeSdo(idx, 0x2032, 3, &amilli, 4, &err) != 0 ||
-            m_can.writeSdo(idx, 0x2032, 1, &en,     4, &err) != 0){
+        /* BSP raw generator: stage freq/amp, then set type=1 to arm. */
+        uint8_t type = 1u;
+        if (m_can.writeSdo(idx, 0x2030, 2, &fmhz,   4, &err) != 0 ||
+            m_can.writeSdo(idx, 0x2030, 3, &amilli, 4, &err) != 0 ||
+            m_can.writeSdo(idx, 0x2030, 1, &type,   1, &err) != 0){
             emit error(QStringLiteral("start BSP V/f: slave %1 — %2").arg(idx).arg(err));
             return;
         }
         emit info(QStringLiteral("BSP V/f on slave %1: %2 Hz, %3 pu")
                       .arg(idx).arg(freqHz, 0, 'g', 4).arg(lv, 0, 'g', 4));
     } else {
-        /* FOC path: setpoint first, then select mode -2. 0x6060 is 2-byte. */
-        uint32_t amilli = static_cast<uint32_t>(std::lround(lv * 1000.0));
-        int16_t  mode   = -2;
-        if (m_can.writeSdo(idx, 0x2031, 1, &fmhz,   4, &err) != 0 ||
-            m_can.writeSdo(idx, 0x2031, 2, &amilli, 4, &err) != 0 ||
+        /* FOC path: type=2 + freq/amp, then 0x6060=-2 to activate cascade. */
+        uint8_t type = 2u;
+        int16_t mode = -2;
+        if (m_can.writeSdo(idx, 0x2030, 1, &type,   1, &err) != 0 ||
+            m_can.writeSdo(idx, 0x2030, 2, &fmhz,   4, &err) != 0 ||
+            m_can.writeSdo(idx, 0x2030, 3, &amilli, 4, &err) != 0 ||
             m_can.writeSdo(idx, 0x6060, 0, &mode,   2, &err) != 0){
             emit error(QStringLiteral("start V/f: slave %1 — %2").arg(idx).arg(err));
             return;
         }
-        /* Read back what actually took, so FOC-doesn't-spin can be diagnosed
-         * from the log: mode (0x6061) must be -2; statusword (0x6041) low
-         * byte should show OPERATION_ENABLED (...0111 / e.g. 0x0237). */
+        /* Diagnostic read-back so FOC-doesn't-spin is debuggable from the
+         * log: 0x6061 must be -2, 0x6041 low byte should show
+         * OPERATION_ENABLED (...0111 / e.g. 0x0237). */
         int16_t  md = 0;  uint16_t sw = 0;  QString rerr;
         (void)m_can.readSdo(idx, 0x6061, 0, &md, 2, &rerr);
         (void)m_can.readSdo(idx, 0x6041, 0, &sw, 2, &rerr);
@@ -570,21 +573,22 @@ void MasterWorker::stopVfOpenLoop(int idx, int engine)
     QMutexLocker lock(&m_mutex);
     if (!m_mgr){ return; }
     QString err;
-    if (engine == 1){            /* BSP: clear 0x2032:1 enable */
-        uint32_t en = 0u;
-        if (m_can.writeSdo(idx, 0x2032, 1, &en, 4, &err) != 0){
-            emit error(QStringLiteral("stop BSP V/f: slave %1 — %2").arg(idx).arg(err));
-        } else {
-            emit info(QStringLiteral("BSP V/f stopped on slave %1").arg(idx));
-        }
-    } else {                     /* FOC: mode NONE (0x6060 is 2-byte) */
+    /* Unified stop: type=0 disarms BSP + idles FOC. For FOC also clear
+     * 0x6060 so the next operator action sees mode NONE. */
+    uint8_t type = 0u;
+    if (m_can.writeSdo(idx, 0x2030, 1, &type, 1, &err) != 0){
+        emit error(QStringLiteral("stop V/f: slave %1 — %2").arg(idx).arg(err));
+        return;
+    }
+    if (engine != 1){
         int16_t mode = 0;
         if (m_can.writeSdo(idx, 0x6060, 0, &mode, 2, &err) != 0){
-            emit error(QStringLiteral("stop V/f: slave %1 — %2").arg(idx).arg(err));
-        } else {
-            emit info(QStringLiteral("V/f stopped on slave %1 (mode NONE)").arg(idx));
+            emit error(QStringLiteral("stop V/f: clear mode slave %1 — %2").arg(idx).arg(err));
+            return;
         }
     }
+    emit info(QStringLiteral("V/f stopped on slave %1 (%2)")
+                  .arg(idx).arg(engine == 1 ? "BSP" : "FOC"));
 }
 
 void MasterWorker::setId(int idx, uint8_t newId)
@@ -660,6 +664,73 @@ void MasterWorker::writeGain(int idx, Loop loop, float kp, float ki)
                       .arg(idx).arg(int(loop))
                       .arg(kp, 0, 'g', 4).arg(ki, 0, 'g', 4));
     }
+}
+
+void MasterWorker::tuneGain(int idx, Loop loop, float bw_hz)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit gainTuned(idx, loop, 0.0f, 0.0f, false);
+        return;
+    }
+    auto* slave = master_mgr_get_slave(m_mgr, idx);
+    if (!slave){
+        emit gainTuned(idx, loop, 0.0f, 0.0f, false);
+        return;
+    }
+    float32_t kp = 0.0f, ki = 0.0f;
+    /* Conservative timeouts. The board's tune service is non-blocking on
+     * its own (a single motor_tune_*_pi call returns in microseconds), but
+     * the master polls 0x2080:04 status -- 2 s of polling at 25 ms/cycle
+     * = 80 cycles, plenty of margin. */
+    const int rc = motor_drive_intf_tune_bw(slave, toIntfLoop(loop),
+                                              bw_hz, &kp, &ki,
+                                              /*timeout_ms=*/2000u,
+                                              /*poll_ms=*/25u);
+    const bool ok = (rc == 0);
+    if (!ok){
+        emit error(QStringLiteral("tune gain slave %1 loop %2 bw %3 Hz failed (rc=%4)")
+                       .arg(idx).arg(int(loop)).arg(bw_hz, 0, 'f', 1).arg(rc));
+    } else {
+        emit info(QStringLiteral("slave %1 loop %2 tuned at %3 Hz -> kp:%4 ki:%5")
+                      .arg(idx).arg(int(loop)).arg(bw_hz, 0, 'f', 1)
+                      .arg(kp, 0, 'g', 4).arg(ki, 0, 'g', 4));
+    }
+    emit gainTuned(idx, loop, kp, ki, ok);
+}
+
+void MasterWorker::captureStep(int idx, Loop loop, float amp, float ref_default)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit stepCaptured(idx, loop, {}, {}, 0.0f, false);
+        return;
+    }
+    auto* slave = master_mgr_get_slave(m_mgr, idx);
+    if (!slave){
+        emit stepCaptured(idx, loop, {}, {}, 0.0f, false);
+        return;
+    }
+    /* 256 samples per buffer. The board fills them on its ISR (TORQUE
+     * mode at 20 kHz = 12.8 ms window, SPEED mode at 2 kHz = 128 ms);
+     * 5 s timeout is comfortable even with master-side polling latency. */
+    QVector<float> buf0(256), buf1(256);
+    uint32_t sample_rate_hz = 0u;
+    const int rc = motor_drive_intf_capture_step(
+        slave, toIntfLoop(loop), amp, ref_default,
+        buf0.data(), buf1.data(), &sample_rate_hz,
+        /*timeout_ms=*/5000u, /*poll_ms=*/50u);
+    const bool ok = (rc == 0);
+    if (!ok){
+        emit error(QStringLiteral("step capture slave %1 loop %2 amp %3 failed (rc=%4)")
+                       .arg(idx).arg(int(loop)).arg(amp, 0, 'f', 3).arg(rc));
+        emit stepCaptured(idx, loop, {}, {}, 0.0f, false);
+        return;
+    }
+    emit info(QStringLiteral("slave %1 loop %2 step amp %3 captured @ %4 Hz")
+                  .arg(idx).arg(int(loop)).arg(amp, 0, 'f', 3).arg(sample_rate_hz));
+    emit stepCaptured(idx, loop, buf0, buf1,
+                       float(sample_rate_hz), true);
 }
 
 /* --- Signal generator ----------------------------------------------- */

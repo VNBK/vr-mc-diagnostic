@@ -88,8 +88,8 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     m_targetCombo->addItem(tr("Torque (Nm)"),      int(TargetKind::Torque));
 
     m_valueSpin = new QDoubleSpinBox(this);
-    m_valueSpin->setRange(-1000.0, 1000.0);
-    m_valueSpin->setDecimals(4);
+    m_valueSpin->setRange(-10000.0, 10000.0);
+    m_valueSpin->setDecimals(8);
     m_valueSpin->setSingleStep(0.01);
 
     m_sendBtn = new QPushButton(tr("Send"), this);
@@ -360,12 +360,13 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
         if (m_idx >= 0) emit walkControlwordRequested(m_idx, 0x0000);
     });
 
-    /* Open-loop V/f. Two engines:
-     *   FOC (0)  -> mode 0x6060 = -2 + setpoint 0x2031; needs Enable (Start
-     *               handles it). BSP (1) -> raw bsp_vf via 0x2032; auto-
-     *               disables FOC. BOTH take a per-unit amplitude (modulation
-     *               depth of Vbus), so the level field is uniform. Engine
-     *               locked while running. */
+    /* Open-loop V/f. Two engines, single OD entry (unified at 0x2030):
+     *   FOC (0)  -> 0x2030:01 type=2 + freq/amp + 0x6060=-2; needs Enable
+     *               (Start handles it). BSP (1) -> 0x2030:01 type=1 +
+     *               freq/amp drives bsp_vf directly; auto-disables FOC.
+     *               BOTH take a per-unit amplitude (modulation depth of
+     *               Vbus), so the level field is uniform. Engine locked
+     *               while running. */
     m_vfEngine = new QComboBox(this);
     m_vfEngine->addItem(tr("FOC (mode -2)"), 0);
     m_vfEngine->addItem(tr("BSP generator"), 1);
@@ -589,7 +590,7 @@ void JointControlPanel::onDegToggled(bool checked)
         m_valueSpin->setSuffix(QStringLiteral(" °"));
         m_valueSpin->setSingleStep(1.0);
     } else {
-        m_valueSpin->setRange(-1000.0, 1000.0);
+        m_valueSpin->setRange(-10000.0, 10000.0);
         m_valueSpin->setSuffix(QStringLiteral(" rad"));
         m_valueSpin->setSingleStep(0.01);
     }

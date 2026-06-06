@@ -18,6 +18,7 @@
 #pragma once
 
 #include "MasterWorker.hpp"
+#include "MotorProfile.hpp"
 
 #include <QElapsedTimer>
 #include <QVector>
@@ -163,7 +164,92 @@ private:
 
 
 /* ======================================================================
- * Container widget with Step + Bode as tabs.
+ * Auto-tune view: model-based PI tune via OD 0x2080 + optional follow-up
+ * step-response capture from the board's STEP_RP_EN harness (no signal
+ * generator -- the board fills bufferData[] itself and the master reads
+ * it back as DOMAIN).
+ * ====================================================================== */
+
+class AutoTuneView : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit AutoTuneView(QWidget* parent = nullptr);
+
+    void setActiveSlave(int idx, const QString& name = {});
+
+    /** Hand the latest motor name-plate down so the BW spinbox can be
+     *  back-computed from the readback Kp via @ref bwFromKp. Called by
+     *  MainWindow after every successful @c readMotorProfile / editor
+     *  commit. Triggers an immediate refresh if Kp is already populated. */
+    void setMotorParams(const vrmc::MotorParams& p);
+
+signals:
+    /** Request a model-based PI auto-tune on the slave. Result lands on
+     *  @ref onGainTuned. */
+    void tuneRequested(int idx, vrmc::Loop loop, float bw_hz);
+    /** Request a step-response capture from the board's STEP_RP_EN harness.
+     *  @p ref_default sets the baseline reference held before/after the
+     *  step (0 = step from rest). Result lands on @ref onStepCaptured. */
+    void captureStepRequested(int idx, vrmc::Loop loop, float amp, float ref_default);
+    /** Refresh the displayed Kp/Ki by reading 0x60F6/F9/FB from the slave.
+     *  Fired on slave-select, loop combo change, and dock re-open so the
+     *  view reflects what the live PI is using. Reply -> @ref onGainRead. */
+    void readGainRequested(int idx, vrmc::Loop loop);
+
+public slots:
+    /** Wired to @c MasterWorker::gainTuned. */
+    void onGainTuned   (int idx, vrmc::Loop loop, float kp, float ki, bool ok);
+    /** Wired to @c MasterWorker::stepCaptured. */
+    void onStepCaptured(int idx, vrmc::Loop loop,
+                         QVector<float> buf0, QVector<float> buf1,
+                         float sample_rate_hz, bool ok);
+    /** Wired to @c MasterWorker::gainRead. Updates the result Kp/Ki view
+     *  (independent from the Tune button -- this is the OD readback path). */
+    void onGainRead    (int idx, vrmc::Loop loop, float kp, float ki, bool ok);
+
+private slots:
+    void onTuneClicked();
+    void onCaptureClicked();
+    void onLoopChanged(int idx);
+
+private:
+    void replotStep(const QVector<float>& buf0, const QVector<float>& buf1,
+                    float sample_rate_hz);
+    void resetChart();
+
+    int                 m_idx = -1;
+
+    /* Cached motor name-plate, pushed from MainWindow. Drives BW
+     * back-compute on Kp readback (board doesn't persist BW). */
+    MotorParams         m_motorParams;
+
+    /* UI */
+    QLabel*             m_label      = nullptr;
+    QComboBox*          m_loop       = nullptr;
+    QDoubleSpinBox*     m_bw         = nullptr;
+    QPushButton*        m_tuneBtn    = nullptr;
+    QLabel*             m_tuneStatus = nullptr;
+    QDoubleSpinBox*     m_kpView     = nullptr;
+    QDoubleSpinBox*     m_kiView     = nullptr;
+
+    QDoubleSpinBox*     m_amp        = nullptr;
+    QDoubleSpinBox*     m_refDefault = nullptr;
+    QPushButton*        m_captureBtn = nullptr;
+    QLabel*             m_captureStatus = nullptr;
+
+    /* Plot. buffer0 = measured signal (Iq or omega depending on loop);
+     * buffer1 = reference / control effort. */
+    QChart*             m_chart      = nullptr;
+    QLineSeries*        m_meas       = nullptr;
+    QLineSeries*        m_ref        = nullptr;
+    QValueAxis*         m_axisX      = nullptr;
+    QValueAxis*         m_axisY      = nullptr;
+};
+
+
+/* ======================================================================
+ * Container widget with Step + Bode + Auto-Tune as tabs.
  * ====================================================================== */
 
 class TuningPane : public QWidget
@@ -172,15 +258,17 @@ class TuningPane : public QWidget
 public:
     explicit TuningPane(QWidget* parent = nullptr);
 
-    StepResponseView* step() const { return m_step; }
-    BodeView*         bode() const { return m_bode; }
+    StepResponseView* step()     const { return m_step;     }
+    BodeView*         bode()     const { return m_bode;     }
+    AutoTuneView*     autoTune() const { return m_autoTune; }
 
     void setActiveSlave(int idx, const QString& name = {});
 
 private:
-    QTabWidget*       m_tabs = nullptr;
-    StepResponseView* m_step = nullptr;
-    BodeView*         m_bode = nullptr;
+    QTabWidget*       m_tabs     = nullptr;
+    StepResponseView* m_step     = nullptr;
+    BodeView*         m_bode     = nullptr;
+    AutoTuneView*     m_autoTune = nullptr;
 };
 
 }  // namespace vrmc

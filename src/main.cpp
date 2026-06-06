@@ -80,6 +80,7 @@ int main(int argc, char** argv)
     qRegisterMetaType<vrmc::DriveConfig>("vrmc::DriveConfig");
     qRegisterMetaType<vrmc::DeviceInfo>("vrmc::DeviceInfo");
     qRegisterMetaType<vrmc::MotorParams>("vrmc::MotorParams");
+    qRegisterMetaType<QVector<float>>("QVector<float>");
 
     QCommandLineParser cli;
     cli.setApplicationDescription(QStringLiteral("VR Motor Control Diagnostic Tool"));

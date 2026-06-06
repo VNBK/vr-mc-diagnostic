@@ -60,8 +60,9 @@ signals:
     /** Manual CiA-402 walk: send one explicit controlword via PDO,
      *  bypassing the cia402_master state machine. Debug aid only. */
     void walkControlwordRequested(int idx, uint16_t cw);
-    /** Open-loop V/f. @p engine 0 = FOC (mode 0x6060=-2 + 0x2031, needs
-     *  Enable), 1 = BSP raw generator (0x2032, auto-disables FOC). @p level
+    /** Open-loop V/f. @p engine 0 = FOC (unified 0x2030 type=2 +
+     *  0x6060=-2, needs Enable), 1 = BSP raw generator (0x2030 type=1,
+     *  auto-disables FOC). @p level
      *  is volts (FOC) or per-unit amplitude (BSP). Start writes setpoint +
      *  starts; live edits stream the setpoint; Stop halts that engine. */
     void vfStartRequested  (int idx, int engine, double freqHz, double level);

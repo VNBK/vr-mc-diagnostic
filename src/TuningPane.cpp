@@ -1,6 +1,8 @@
 #include "TuningPane.hpp"
+#include "BwFromKp.hpp"
 
 #include <QChart>
+#include <QSignalBlocker>
 #include <QChartView>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -16,8 +18,11 @@
 #include <QValueAxis>
 #include <QVBoxLayout>
 
+#include <QPainter>
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace vrmc {
 
@@ -525,13 +530,366 @@ void BodeView::analyseCurrentPoint()
  *  TuningPane
  * ==================================================================== */
 
+/* ======================================================================
+ *  AutoTuneView
+ * ====================================================================== */
+
+static double defaultTuneBw(Loop l)
+{
+    switch (l){
+    case Loop::Current:  return 1500.0;
+    case Loop::Velocity: return  100.0;
+    case Loop::Position: return   20.0;
+    }
+    return 100.0;
+}
+
+static double defaultStepAmp(Loop l)
+{
+    /* Conservative per-loop defaults:
+     *   - Current in amperes
+     *   - Velocity in rad/s (master frame; gear-converted on board)
+     *   - Position in rad (master frame; ~1 rad = ~57° -- big enough to
+     *     see settle behaviour but well inside any sane position limit). */
+    switch (l){
+    case Loop::Current:  return  0.2;   /* A     */
+    case Loop::Velocity: return 20.0;   /* rad/s */
+    case Loop::Position: return  1.0;   /* rad   */
+    }
+    return 1.0;
+}
+
+AutoTuneView::AutoTuneView(QWidget* parent) : QWidget(parent)
+{
+    m_label = new QLabel(tr("(no slave selected)"), this);
+    m_label->setStyleSheet(QStringLiteral("color: #555; font-style: italic;"));
+
+    m_loop = new QComboBox(this);
+    m_loop->addItem(tr("Current"),  int(Loop::Current));
+    m_loop->addItem(tr("Velocity"), int(Loop::Velocity));
+    m_loop->addItem(tr("Position"), int(Loop::Position));
+
+    m_bw = new QDoubleSpinBox(this);
+    m_bw->setRange(0.1, 5000.0);
+    m_bw->setDecimals(1);
+    m_bw->setSingleStep(10.0);
+    m_bw->setSuffix(QStringLiteral(" Hz"));
+    m_bw->setValue(defaultTuneBw(Loop::Current));
+
+    m_tuneBtn = new QPushButton(tr("▶ Tune"), this);
+    m_tuneStatus = new QLabel(this);
+    m_tuneStatus->setMinimumWidth(120);
+
+    m_kpView = new QDoubleSpinBox(this);
+    m_kiView = new QDoubleSpinBox(this);
+    for (QDoubleSpinBox* sb : { m_kpView, m_kiView }){
+        sb->setRange(-1e9, 1e9);
+        sb->setDecimals(6);
+        sb->setReadOnly(true);
+        sb->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        sb->setStyleSheet(QStringLiteral("background: #f4f4f4;"));
+    }
+
+    m_amp = new QDoubleSpinBox(this);
+    m_amp->setRange(-1000.0, 1000.0);
+    m_amp->setDecimals(3);
+    m_amp->setSingleStep(0.1);
+    m_amp->setValue(defaultStepAmp(Loop::Current));
+
+    m_refDefault = new QDoubleSpinBox(this);
+    m_refDefault->setRange(-1000.0, 1000.0);
+    m_refDefault->setDecimals(3);
+    m_refDefault->setSingleStep(0.1);
+    m_refDefault->setValue(0.0);
+
+    m_captureBtn = new QPushButton(tr("▶ Capture Step"), this);
+    m_captureStatus = new QLabel(this);
+    m_captureStatus->setMinimumWidth(120);
+
+    /* Layout: top control row (tune), middle result row, then a thin
+     * follow-up row (step capture), then the chart fills the rest. */
+    auto* tuneRow = new QHBoxLayout;
+    tuneRow->addWidget(new QLabel(tr("Loop:"), this));
+    tuneRow->addWidget(m_loop);
+    tuneRow->addSpacing(8);
+    tuneRow->addWidget(new QLabel(tr("BW:"), this));
+    tuneRow->addWidget(m_bw);
+    tuneRow->addSpacing(8);
+    tuneRow->addWidget(m_tuneBtn);
+    tuneRow->addWidget(m_tuneStatus);
+    tuneRow->addStretch(1);
+
+    auto* resultRow = new QHBoxLayout;
+    resultRow->addWidget(new QLabel(tr("Result Kp:"), this));
+    resultRow->addWidget(m_kpView);
+    resultRow->addSpacing(8);
+    resultRow->addWidget(new QLabel(tr("Ki:"), this));
+    resultRow->addWidget(m_kiView);
+    resultRow->addStretch(1);
+
+    auto* captureRow = new QHBoxLayout;
+    captureRow->addWidget(new QLabel(tr("Verify — ref:"), this));
+    captureRow->addWidget(m_refDefault);
+    captureRow->addSpacing(8);
+    captureRow->addWidget(new QLabel(tr("step amp:"), this));
+    captureRow->addWidget(m_amp);
+    captureRow->addSpacing(8);
+    captureRow->addWidget(m_captureBtn);
+    captureRow->addWidget(m_captureStatus);
+    captureRow->addStretch(1);
+
+    /* Chart: measured signal (buffer0) + reference / control effort
+     * (buffer1). Time on X (ms), two Y series sharing one axis -- the
+     * units differ between loops but Qt Charts handles a unified axis
+     * fine for a rough plot. */
+    m_meas = new QLineSeries;
+    m_ref  = new QLineSeries;
+    m_meas->setName(tr("Measured (buf0)"));
+    m_ref ->setName(tr("Reference / Iq (buf1)"));
+
+    m_chart = new QChart;
+    m_chart->addSeries(m_meas);
+    m_chart->addSeries(m_ref);
+    m_chart->legend()->setAlignment(Qt::AlignBottom);
+    m_chart->setMargins(QMargins(2, 2, 2, 2));
+
+    m_axisX = new QValueAxis;
+    m_axisX->setTitleText(tr("Time (ms)"));
+    m_axisX->setRange(0.0, 128.0);
+    m_axisY = new QValueAxis;
+    m_axisY->setTitleText(tr("Signal"));
+    m_axisY->setRange(-1.0, 1.0);
+    m_chart->addAxis(m_axisX, Qt::AlignBottom);
+    m_chart->addAxis(m_axisY, Qt::AlignLeft);
+    m_meas->attachAxis(m_axisX); m_meas->attachAxis(m_axisY);
+    m_ref ->attachAxis(m_axisX); m_ref ->attachAxis(m_axisY);
+
+    auto* chartView = new QChartView(m_chart);
+    chartView->setRenderHint(QPainter::Antialiasing);
+
+    auto* root = new QVBoxLayout(this);
+    root->addWidget(m_label);
+    root->addLayout(tuneRow);
+    root->addLayout(resultRow);
+    root->addLayout(captureRow);
+    root->addWidget(chartView, /*stretch=*/1);
+
+    connect(m_tuneBtn,    &QPushButton::clicked, this, &AutoTuneView::onTuneClicked);
+    connect(m_captureBtn, &QPushButton::clicked, this, &AutoTuneView::onCaptureClicked);
+    connect(m_loop, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,   &AutoTuneView::onLoopChanged);
+
+    setActiveSlave(-1);
+}
+
+void AutoTuneView::setActiveSlave(int idx, const QString& name)
+{
+    m_idx = idx;
+    const bool en = (idx >= 0);
+    m_label->setText(en ? tr("Slave %1 — %2").arg(idx).arg(name)
+                         : tr("(no slave selected)"));
+    m_loop->setEnabled(en);
+    m_bw->setEnabled(en);
+    m_tuneBtn->setEnabled(en);
+    m_amp->setEnabled(en);
+    m_refDefault->setEnabled(en);
+    m_captureBtn->setEnabled(en);
+    if (en){
+        /* Pull the current PI gains for the selected loop so Result Kp/Ki
+         * reflects what the live controller is using -- second open of the
+         * dock (or slave re-select) repopulates from the OD instead of
+         * showing the stale 0.0 / 0.0 from the previous tear-down. Routes
+         * through MasterWorker -> SDO 0x60F6/F9/FB -> board on_read hook
+         * -> latest motor_get_*_gain values. onGainRead also back-computes
+         * BW from the readback Kp, so the spinbox lands on the BW that
+         * actually corresponds to the live controller. */
+        const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+        emit readGainRequested(idx, l);
+    } else {
+        m_tuneStatus->clear();
+        m_captureStatus->clear();
+        m_kpView->setValue(0.0);
+        m_kiView->setValue(0.0);
+        resetChart();
+    }
+}
+
+void AutoTuneView::onLoopChanged(int)
+{
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    /* Seed BW to the conservative per-loop default while we wait for the
+     * SDO readback; onGainRead will overwrite it with the back-computed
+     * value once Kp lands. */
+    m_bw->setValue(defaultTuneBw(l));
+    m_amp->setValue(defaultStepAmp(l));
+    /* Refresh the displayed Kp/Ki for the new loop -- the previous selection's
+     * values are stale once the operator switches. Clear them first so the
+     * SDO round-trip latency doesn't leave the wrong loop's numbers visible. */
+    m_kpView->setValue(0.0);
+    m_kiView->setValue(0.0);
+    if (m_idx >= 0){
+        emit readGainRequested(m_idx, l);
+    }
+}
+
+void AutoTuneView::onGainRead(int idx, Loop loop, float kp, float ki, bool ok)
+{
+    if (idx != m_idx){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    if (loop != l){ return; }
+    if (ok){
+        m_kpView->setValue(kp);
+        m_kiView->setValue(ki);
+        /* Back-compute BW from live Kp + cached motor profile so the
+         * BW spinbox reflects what the controller actually realises.
+         * Block the spinbox signal -- not strictly required (no
+         * valueChanged hook anymore) but keeps the behaviour clean if
+         * one is added later. */
+        const float bw = bwFromKp(loop, kp, m_motorParams);
+        if (std::isfinite(bw) && bw > 0.0f){
+            QSignalBlocker blk(m_bw);
+            m_bw->setValue(bw);
+        }
+    } else {
+        m_kpView->setValue(0.0);
+        m_kiView->setValue(0.0);
+    }
+}
+
+void AutoTuneView::setMotorParams(const MotorParams& p)
+{
+    m_motorParams = p;
+    /* Refresh BW from the existing Kp readback (if any) against the new
+     * profile -- a fresh Ls_q / J / Kt shifts what BW the live Kp maps
+     * to, so the spinbox should follow. */
+    const float kp = static_cast<float>(m_kpView->value());
+    if (kp == 0.0f){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    const float bw = bwFromKp(l, kp, m_motorParams);
+    if (std::isfinite(bw) && bw > 0.0f){
+        QSignalBlocker blk(m_bw);
+        m_bw->setValue(bw);
+    }
+}
+
+void AutoTuneView::onTuneClicked()
+{
+    if (m_idx < 0){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    m_tuneStatus->setText(tr("tuning…"));
+    m_tuneStatus->setStyleSheet(QStringLiteral("color: #555;"));
+    m_tuneBtn->setEnabled(false);
+    emit tuneRequested(m_idx, l, static_cast<float>(m_bw->value()));
+}
+
+void AutoTuneView::onGainTuned(int idx, Loop loop, float kp, float ki, bool ok)
+{
+    if (idx != m_idx){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    if (loop != l){ return; }
+    if (ok){
+        m_kpView->setValue(kp);
+        m_kiView->setValue(ki);
+        /* Re-derive BW from the tuned Kp -- normally matches the
+         * requested BW, but reflects any clamping/rounding the solver
+         * applied. */
+        const float bw = bwFromKp(loop, kp, m_motorParams);
+        if (std::isfinite(bw) && bw > 0.0f){
+            QSignalBlocker blk(m_bw);
+            m_bw->setValue(bw);
+        }
+        m_tuneStatus->setText(tr("tuned"));
+        m_tuneStatus->setStyleSheet(QStringLiteral("color: #228822;"));
+    } else {
+        m_tuneStatus->setText(tr("failed"));
+        m_tuneStatus->setStyleSheet(QStringLiteral("color: #c0392b;"));
+    }
+    m_tuneBtn->setEnabled(m_idx >= 0);
+}
+
+void AutoTuneView::onCaptureClicked()
+{
+    if (m_idx < 0){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    /* All three loops now supported on the board side; Position uses an
+     * app-local 100 Hz sampler (the SDK stepRPVars only covers current
+     * / speed / torque). Same MasterWorker capture flow regardless. */
+    m_captureStatus->setText(tr("capturing…"));
+    m_captureStatus->setStyleSheet(QStringLiteral("color: #555;"));
+    m_captureBtn->setEnabled(false);
+    resetChart();
+    emit captureStepRequested(m_idx, l,
+                              static_cast<float>(m_amp->value()),
+                              static_cast<float>(m_refDefault->value()));
+}
+
+void AutoTuneView::onStepCaptured(int idx, Loop loop,
+                                    QVector<float> buf0, QVector<float> buf1,
+                                    float sample_rate_hz, bool ok)
+{
+    if (idx != m_idx){ return; }
+    const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+    if (loop != l){ return; }
+    if (ok && buf0.size() == 256 && buf1.size() == 256){
+        replotStep(buf0, buf1, sample_rate_hz);
+        m_captureStatus->setText(tr("done @ %1 kHz").arg(sample_rate_hz / 1000.0, 0, 'f', 1));
+        m_captureStatus->setStyleSheet(QStringLiteral("color: #228822;"));
+    } else {
+        m_captureStatus->setText(tr("failed"));
+        m_captureStatus->setStyleSheet(QStringLiteral("color: #c0392b;"));
+    }
+    m_captureBtn->setEnabled(m_idx >= 0);
+}
+
+void AutoTuneView::replotStep(const QVector<float>& buf0,
+                                const QVector<float>& buf1,
+                                float sample_rate_hz)
+{
+    m_meas->clear();
+    m_ref ->clear();
+    const double dt_ms = sample_rate_hz > 0.0f
+        ? 1000.0 / double(sample_rate_hz) : 0.5;
+    float y_min = std::numeric_limits<float>::infinity();
+    float y_max = -y_min;
+    for (int i = 0; i < buf0.size(); ++i){
+        const double t = i * dt_ms;
+        m_meas->append(t, buf0[i]);
+        if (buf0[i] < y_min){ y_min = buf0[i]; }
+        if (buf0[i] > y_max){ y_max = buf0[i]; }
+    }
+    for (int i = 0; i < buf1.size(); ++i){
+        const double t = i * dt_ms;
+        m_ref->append(t, buf1[i]);
+        if (buf1[i] < y_min){ y_min = buf1[i]; }
+        if (buf1[i] > y_max){ y_max = buf1[i]; }
+    }
+    const double pad = std::max(0.05, (y_max - y_min) * 0.1);
+    m_axisX->setRange(0.0, (buf0.size() - 1) * dt_ms);
+    m_axisY->setRange(y_min - pad, y_max + pad);
+}
+
+void AutoTuneView::resetChart()
+{
+    m_meas->clear();
+    m_ref ->clear();
+    m_axisX->setRange(0.0, 128.0);
+    m_axisY->setRange(-1.0, 1.0);
+}
+
+
+/* ====================================================================
+ *  TuningPane
+ * ==================================================================== */
+
 TuningPane::TuningPane(QWidget* parent) : QWidget(parent)
 {
-    m_step = new StepResponseView;
-    m_bode = new BodeView;
+    m_step     = new StepResponseView;
+    m_bode     = new BodeView;
+    m_autoTune = new AutoTuneView;
     m_tabs = new QTabWidget(this);
-    m_tabs->addTab(m_step, tr("Step"));
-    m_tabs->addTab(m_bode, tr("Bode"));
+    m_tabs->addTab(m_step,     tr("Step"));
+    m_tabs->addTab(m_bode,     tr("Bode"));
+    m_tabs->addTab(m_autoTune, tr("Auto-Tune"));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -540,8 +898,9 @@ TuningPane::TuningPane(QWidget* parent) : QWidget(parent)
 
 void TuningPane::setActiveSlave(int idx, const QString& name)
 {
-    m_step->setActiveSlave(idx, name);
-    m_bode->setActiveSlave(idx, name);
+    m_step    ->setActiveSlave(idx, name);
+    m_bode    ->setActiveSlave(idx, name);
+    m_autoTune->setActiveSlave(idx, name);
 }
 
 }  // namespace vrmc

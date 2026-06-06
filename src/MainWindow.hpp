@@ -126,6 +126,11 @@ private:
      *  targets and telemetry convert per-motor. */
     void pushScalingToWorker();
 
+    /** Hand the active motor params to every UI surface that needs them
+     *  for derived display (BW back-compute on the Gains tab and the
+     *  Auto-Tune tab). Called whenever @c m_motorParams changes. */
+    void pushProfileToTuning();
+
     /** Open the modal motor-profile editor on the cached params + write the
      *  result to the selected slave. Split from onEditMotorProfile so the
      *  latter can read-from-slave first (see onMotorProfileRead). */

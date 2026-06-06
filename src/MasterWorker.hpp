@@ -223,6 +223,18 @@ public slots:
     /* Gain editor I/O. Response lands on @c gainRead signal. */
     void readGain   (int idx, vrmc::Loop loop);
     void writeGain  (int idx, vrmc::Loop loop, float kp, float ki);
+    /** Model-based PI auto-tune at @p bw_hz. Wraps SDK
+     *  @c motor_drive_intf_tune_bw via OD 0x2080. Synchronous on the
+     *  worker thread; emits @ref gainTuned with the result Kp + Ki when
+     *  the slave finishes (or with ok=false on error). */
+    void tuneGain   (int idx, vrmc::Loop loop, float bw_hz);
+    /** Arm a step-response capture from the board's STEP_RP_EN harness
+     *  (OD 0x2080:07..0E). Writes ref_default (:0E) + amp (:09) then
+     *  fires trigger (:07); polls :08 status until done, then reads
+     *  256 samples per buffer via the indexed read window :0B/:0C/:0D.
+     *  Emits @ref stepCaptured. @p ref_default is the baseline reference
+     *  held before/after the step (0 = step from rest). */
+    void captureStep(int idx, vrmc::Loop loop, float amp, float ref_default);
 
     /* Signal generator driven off a worker-thread QTimer. */
     void startGenerator(int idx, vrmc::GenCfg cfg);
@@ -276,6 +288,13 @@ signals:
     void info (const QString& msg);
     void snapshots(QVector<vrmc::SlaveSnapshot> snap);
     void gainRead (int idx, vrmc::Loop loop, float kp, float ki, bool ok);
+    /** Fired by @ref tuneGain when the slave finishes (or errors out). */
+    void gainTuned(int idx, vrmc::Loop loop, float kp, float ki, bool ok);
+    /** Fired by @ref captureStep with the two 256-sample buffers + sample
+     *  rate (Hz). On failure, buf0/buf1 are empty and ok = false. */
+    void stepCaptured(int idx, vrmc::Loop loop,
+                       QVector<float> buf0, QVector<float> buf1,
+                       float sample_rate_hz, bool ok);
     void generatorStarted(int idx);
     void generatorStopped(int idx);
     void pdoMappingApplied(int idx, bool isTpdo, bool ok, QString message);
@@ -385,4 +404,5 @@ Q_DECLARE_METATYPE(vrmc::CanBackend::PdoMapEntry)
 Q_DECLARE_METATYPE(QVector<vrmc::CanBackend::PdoMapEntry>)
 Q_DECLARE_METATYPE(vrmc::DriveConfig)
 Q_DECLARE_METATYPE(vrmc::DeviceInfo)
+Q_DECLARE_METATYPE(QVector<float>)
 Q_DECLARE_METATYPE(vrmc::MotorParams)

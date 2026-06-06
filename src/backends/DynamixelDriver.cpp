@@ -558,6 +558,8 @@ static const motor_drive_intf_proc_t kDxlProc = {
     /* .set_pos_limit   */ nullptr,
     /* .set_gain        */ nullptr,
     /* .get_gain        */ nullptr,
+    /* .tune_bw         */ nullptr,   /* dynamixel has no model-based PI auto-tune */
+    /* .capture_step    */ nullptr,   /* nor a step-response harness via OD        */
     /* .get_position    */ op_get_position,
     /* .get_velocity    */ op_get_velocity,
     /* .get_torque      */ op_get_torque,
