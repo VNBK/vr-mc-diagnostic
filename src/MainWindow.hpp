@@ -74,17 +74,15 @@ private slots:
     void onSelectionChanged();
 
     /* File menu. */
-    void onOpenProfile();
-    void onSaveProfile();
-    void onSaveProfileAs();
     void onEditMotorProfile();
     /** Result of MasterWorker::readMotorProfile — refresh the cached profile
      *  + view from the slave, then open the editor if a read-to-edit is pending. */
     void onMotorProfileRead(int idx, vrmc::MotorParams mp, bool ok, QString message);
 
     /* Drive menu. */
-    void onSaveConfigToFlash();
-    void onLoadConfigFromFlash();
+    /** Drive ▸ Restore Default Parameters…  (formerly Factory Reset).
+     *  Writes 0x1011:01 = "load" → board erases both blobs; defaults
+     *  take effect on next power-cycle / NMT reset. */
     void onFactoryReset();
     void onUploadFirmware();
     void onConfigureDrive();
@@ -138,6 +136,18 @@ private:
 
     void notImplemented(const QString& feature);
 
+    /** Resolve the slave index from the current table selection. Returns
+     *  -1 if nothing is selected; the caller is expected to show a
+     *  "select a slave first" message in that case. */
+    int  selectedSlaveIdx() const;
+
+    /** Issue a magic-guarded SDO write to OD 0x1010 (save) or 0x1011
+     *  (restore). Blocks until the worker reports back (~50 ms total:
+     *  CAN round-trip + ~40 ms flash erase+program on the slave), then
+     *  updates the status bar / shows a message box on failure. */
+    void sendStorageCommand(uint16_t odIdx, uint8_t sub, uint32_t magic,
+                            const QString& busyMsg, const QString& okMsg);
+
     QThread           m_workerThread;
     MasterWorker*     m_worker    = nullptr;
 
@@ -181,9 +191,6 @@ private:
     QAction*              m_profileAct   = nullptr;
 
     /* File menu actions. */
-    QAction*          m_openProfileAct    = nullptr;
-    QAction*          m_saveProfileAct    = nullptr;
-    QAction*          m_saveProfileAsAct  = nullptr;
     QAction*          m_editProfileAct    = nullptr;
     QAction*          m_exitAct           = nullptr;
 
@@ -193,8 +200,6 @@ private:
     QAction*          m_reconnectAct      = nullptr;
 
     /* Drive. */
-    QAction*          m_saveToFlashAct    = nullptr;
-    QAction*          m_loadFromFlashAct  = nullptr;
     QAction*          m_factoryResetAct   = nullptr;
     QAction*          m_uploadFirmwareAct = nullptr;
     QAction*          m_configureDriveAct = nullptr;
@@ -218,7 +223,6 @@ private:
 
     /* Misc. */
     QLabel*                          m_statusLabel       = nullptr;
-    QString                          m_currentProfilePath;
     vrmc::CanConfig                  m_lastConfig;
     vrmc::MotorParams                m_motorParams;       /**< loaded / edited */
     bool                             m_profileEditPending = false; /**< read-then-open */

@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
+#include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -110,11 +111,32 @@ MotorProfileEditor::MotorProfileEditor(QWidget* parent) : QDialog(parent)
     auto* encForm = new QFormLayout(encBox);
     encForm->addRow(tr("CPR (= 4 × lines, 0x2070:11)"), m_cpr);
 
-    /* Buttons ---------------------------------------------------------- */
+    /* Buttons ---------------------------------------------------------- *
+     * Read   = re-fetch 0x2070 + 0x6075 from the slave; updates the form.
+     * Save   = accept dialog (caller handles SDO write + 0x1010:01 flash
+     *          commit -- this dialog is data-only). Renamed from "OK" to
+     *          make the storage semantics match the Drive Config dialog. */
     auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    if (auto* saveBtn = buttons->button(QDialogButtonBox::Save)){
+        saveBtn->setText(tr("Save"));
+        saveBtn->setToolTip(
+            tr("Write profile to drive (0x2070 + 0x6075) AND commit to flash\n"
+               "(0x1010:01 = \"save\"). Survives reboot."));
+    }
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    m_readBtn = new QPushButton(tr("Read from drive"), this);
+    m_readBtn->setToolTip(
+        tr("Re-fetch 0x2070 + 0x6075 from the selected slave and refresh\n"
+           "this form. Disabled until a slave is selected."));
+    m_readBtn->setEnabled(false);
+    connect(m_readBtn, &QPushButton::clicked,
+            this,      &MotorProfileEditor::onReadClicked);
+    /* Place Read on the LEFT side of the button box so it sits next to
+     * the form fields, separate from the Save/Cancel pair on the right. */
+    buttons->addButton(m_readBtn, QDialogButtonBox::ResetRole);
 
     /* Root ------------------------------------------------------------- */
     auto* root = new QVBoxLayout(this);
@@ -123,6 +145,18 @@ MotorProfileEditor::MotorProfileEditor(QWidget* parent) : QDialog(parent)
     root->addWidget(ratingBox);
     root->addWidget(encBox);
     root->addWidget(buttons);
+}
+
+void MotorProfileEditor::setSlaveContext(int slaveIdx)
+{
+    m_slaveIdx = slaveIdx;
+    if (m_readBtn) m_readBtn->setEnabled(slaveIdx >= 0);
+}
+
+void MotorProfileEditor::onReadClicked()
+{
+    if (m_slaveIdx < 0) return;
+    emit readRequested(m_slaveIdx);
 }
 
 void MotorProfileEditor::setParams(const MotorParams& mp)

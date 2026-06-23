@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include <algorithm>
+#include <memory>
 
 #include "ConnectionDialog.hpp"
 #include "DriveConfigDialog.hpp"
@@ -58,6 +59,7 @@
 #include <QToolBar>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QScreen>
 
 namespace vrmc {
 
@@ -166,6 +168,12 @@ void MainWindow::buildUi()
         addDockWidget(Qt::RightDockWidgetArea, dock);
         dock->setFloating(true);
         dock->resize(sz);
+
+        if (QScreen *screen = QGuiApplication::primaryScreen()) {
+            QRect geo = screen->geometry();
+            dock->move((geo.width() - sz.width()) / 2, (geo.height() - sz.height()) / 2);
+        }
+
         dock->hide();
         return dock;
     };
@@ -394,20 +402,10 @@ void MainWindow::buildMenus()
     /* --- File --- */
     auto* fileMenu = menuBar()->addMenu(tr("&File"));
 
-    m_openProfileAct = new QAction(
-        style->standardIcon(QStyle::SP_DialogOpenButton), tr("&Open Profile…"), this);
-    m_openProfileAct->setShortcut(QKeySequence::Open);
-    m_openProfileAct->setStatusTip(tr("Load a motor-profile JSON file"));
-    connect(m_openProfileAct, &QAction::triggered, this, &MainWindow::onOpenProfile);
-
-    m_saveProfileAct = new QAction(
-        style->standardIcon(QStyle::SP_DialogSaveButton), tr("&Save Profile"), this);
-    m_saveProfileAct->setShortcut(QKeySequence::Save);
-    connect(m_saveProfileAct, &QAction::triggered, this, &MainWindow::onSaveProfile);
-
-    m_saveProfileAsAct = new QAction(tr("Save Profile &As…"), this);
-    m_saveProfileAsAct->setShortcut(QKeySequence::SaveAs);
-    connect(m_saveProfileAsAct, &QAction::triggered, this, &MainWindow::onSaveProfileAs);
+    /* JSON Open/Save Profile removed: this tool supports multiple motors
+     * per session, and the motor name-plate is persisted per-slave on the
+     * drive's own flash (motor_drive_params blob). Use the Motor Profile
+     * editor to edit + flash the selected slave's profile directly. */
 
     m_editProfileAct = new QAction(tr("&Edit Motor Profile…"), this);
     m_editProfileAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_E));
@@ -418,10 +416,6 @@ void MainWindow::buildMenus()
     m_exitAct->setShortcut(QKeySequence::Quit);
     connect(m_exitAct, &QAction::triggered, this, &QMainWindow::close);
 
-    fileMenu->addAction(m_openProfileAct);
-    fileMenu->addAction(m_saveProfileAct);
-    fileMenu->addAction(m_saveProfileAsAct);
-    fileMenu->addSeparator();
     fileMenu->addAction(m_editProfileAct);
     fileMenu->addSeparator();
     fileMenu->addAction(m_exitAct);
@@ -454,11 +448,22 @@ void MainWindow::buildMenus()
     connMenu->addAction(m_disconnectAct);
     connMenu->addAction(m_reconnectAct);
 
-    /* --- Drive --- */
+    /* --- Drive ---
+     *
+     * Save / Load Config to/from Flash removed: the canonical per-blob
+     * Save (0x1010:01/04/05) lives inside the Drive Config dialog
+     * (Save button + Storage tab) and the Motor Profile editor's Save
+     * button. "Load from Flash" never had a CiA-301 backing -- each
+     * dialog's "Read from drive" button covers the UI-refresh use case.
+     *
+     * Factory Reset stays as a destructive shortcut (renamed to be
+     * specific about what it wipes), and writes 0x1011:01 = "load". */
     auto* driveMenu = menuBar()->addMenu(tr("&Drive"));
-    m_saveToFlashAct   = new QAction(tr("Save Config &to Flash"), this);
-    m_loadFromFlashAct = new QAction(tr("&Load Config from Flash"), this);
-    m_factoryResetAct  = new QAction(tr("&Factory Reset…"), this);
+    m_factoryResetAct  = new QAction(tr("&Restore Default Parameters…"), this);
+    m_factoryResetAct->setToolTip(
+        tr("Erase both parameter blobs on the selected drive (0x1011:01). "
+           "Factory defaults take effect after the next power-cycle / NMT "
+           "reset; the live motor keeps its current gains."));
     m_uploadFirmwareAct = new QAction(
         makeFirmwareIcon(), tr("&Upload Firmware…"), this);
     m_configureDriveAct = new QAction(
@@ -468,17 +473,12 @@ void MainWindow::buildMenus()
     m_deviceInfoAct = new QAction(
         style->standardIcon(QStyle::SP_MessageBoxInformation),
         tr("Device &Info"), this);
-    connect(m_saveToFlashAct,    &QAction::triggered, this, &MainWindow::onSaveConfigToFlash);
-    connect(m_loadFromFlashAct,  &QAction::triggered, this, &MainWindow::onLoadConfigFromFlash);
     connect(m_factoryResetAct,   &QAction::triggered, this, &MainWindow::onFactoryReset);
     connect(m_uploadFirmwareAct, &QAction::triggered, this, &MainWindow::onUploadFirmware);
     connect(m_configureDriveAct, &QAction::triggered, this, &MainWindow::onConfigureDrive);
     connect(m_deviceInfoAct,     &QAction::triggered, this, &MainWindow::onDeviceInfo);
     driveMenu->addAction(m_configureDriveAct);
     driveMenu->addAction(m_deviceInfoAct);
-    driveMenu->addSeparator();
-    driveMenu->addAction(m_saveToFlashAct);
-    driveMenu->addAction(m_loadFromFlashAct);
     driveMenu->addSeparator();
     driveMenu->addAction(m_factoryResetAct);
     driveMenu->addSeparator();
@@ -553,11 +553,6 @@ void MainWindow::buildToolbar()
     toolbar->setMovable(false);
     toolbar->setIconSize(QSize(28, 28));
     toolbar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-
-    /* File group. */
-    toolbar->addAction(m_openProfileAct);
-    toolbar->addAction(m_saveProfileAct);
-    toolbar->addSeparator();
 
     /* Connection group. */
     toolbar->addAction(m_connectAct);
@@ -939,94 +934,77 @@ void MainWindow::notImplemented(const QString& feature)
            "handler currently logs and returns.").arg(feature));
 }
 
-void MainWindow::onOpenProfile()
+int MainWindow::selectedSlaveIdx() const
 {
-    const QString path = QFileDialog::getOpenFileName(
-        this, tr("Open motor profile"), m_currentProfilePath,
-        tr("Motor profile (*.json);;All files (*)"));
-    if (path.isEmpty()){ return; }
-
-    MotorProfile mp;
-    QString err;
-    if (!profile::load(path, &mp, &err)){
-        m_log->appendError(tr("load profile failed: %1").arg(err));
-        QMessageBox::warning(this, tr("Open motor profile"), err);
-        return;
-    }
-    m_currentProfilePath = path;
-    m_motorParams = mp.motor;
-    m_lastConfig  = mp.connection;
-    m_profileView->setParams(m_motorParams);
-    pushScalingToWorker();
-    pushProfileToTuning();
-    m_log->appendInfo(tr("loaded profile %1 (schema v%2): "
-                         "type=%3 pole_pair=%4 Rs=%5 Ls_d=%6 Ls_q=%7 "
-                         "λ=%8 J=%9")
-                          .arg(path).arg(mp.schemaVersion)
-                          .arg(profile::motorTypeToString(mp.motor.type))
-                          .arg(mp.motor.pole_pair)
-                          .arg(mp.motor.rs, 0, 'g', 4)
-                          .arg(mp.motor.ls_d, 0, 'g', 4)
-                          .arg(mp.motor.ls_q, 0, 'g', 4)
-                          .arg(mp.motor.rated_flux, 0, 'g', 4)
-                          .arg(mp.motor.inertia,    0, 'g', 4));
-
-    /* If we're already connected, drop the current link so the new
-     * config takes effect cleanly. Then auto-connect with the loaded
-     * settings. */
-    if (m_disconnectAct->isEnabled()){
-        emit disconnectRequested();
-    }
-    QTimer::singleShot(150, this, [this]{
-        emit connectRequested(m_lastConfig);
-    });
+    if (!m_table || !m_table->selectionModel()) return -1;
+    const auto rows = m_table->selectionModel()->selectedRows();
+    if (rows.isEmpty()) return -1;
+    const int row = rows.first().row();
+    return m_model->index(row, SlaveTableModel::ColIdx).data().toInt();
 }
 
-void MainWindow::onSaveProfile()
+void MainWindow::sendStorageCommand(uint16_t odIdx, uint8_t sub, uint32_t magic,
+                                    const QString& busyMsg,
+                                    const QString& okMsg)
 {
-    if (m_currentProfilePath.isEmpty()){
-        onSaveProfileAs();
+    const int idx = selectedSlaveIdx();
+    if (idx < 0){
+        QMessageBox::information(this, busyMsg,
+            tr("Select a slave in the table first."));
         return;
     }
-    MotorProfile mp;
-    mp.motor      = m_motorParams;
-    mp.connection = m_lastConfig;
-    QString err;
-    if (!profile::save(m_currentProfilePath, mp, &err)){
-        m_log->appendError(tr("save profile failed: %1").arg(err));
-        QMessageBox::warning(this, tr("Save motor profile"), err);
-        return;
-    }
-    m_log->appendInfo(tr("saved profile %1").arg(m_currentProfilePath));
-}
 
-void MainWindow::onSaveProfileAs()
-{
-    const QString path = QFileDialog::getSaveFileName(
-        this, tr("Save motor profile as"),
-        m_currentProfilePath.isEmpty()
-            ? QStringLiteral("vr_mc_profile.json")
-            : m_currentProfilePath,
-        tr("Motor profile (*.json);;All files (*)"));
-    if (path.isEmpty()){ return; }
-    m_currentProfilePath = path;
-    onSaveProfile();
+    /* Encode the magic value as 4 LE bytes (matches the wire-side
+     * uint32 the board parses in on_store_params_written /
+     * on_restore_params_written). */
+    QByteArray payload(4, '\0');
+    payload[0] = static_cast<char>( magic        & 0xFFu);
+    payload[1] = static_cast<char>((magic >> 8 ) & 0xFFu);
+    payload[2] = static_cast<char>((magic >> 16) & 0xFFu);
+    payload[3] = static_cast<char>((magic >> 24) & 0xFFu);
+
+    statusBar()->showMessage(busyMsg);
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+
+    /* One-shot listener filtered by (idx, odIdx, sub). The worker emits
+     * customSdoDone once per customSdoWrite; we disconnect immediately
+     * so a subsequent storage write doesn't trigger the wrong UI. */
+    auto holder = std::make_shared<QMetaObject::Connection>();
+    *holder = connect(m_worker, &MasterWorker::customSdoDone, this,
+        [this, holder, idx, odIdx, sub, okMsg]
+        (int doneIdx, bool isWrite, uint16_t doneOd, uint8_t doneSub,
+         bool ok, QString /*valueDecoded*/, QString message){
+            if (doneIdx != idx || !isWrite || doneOd != odIdx || doneSub != sub) return;
+            QObject::disconnect(*holder);
+            QApplication::restoreOverrideCursor();
+            if (ok){
+                statusBar()->showMessage(okMsg, 4000);
+                m_log->appendInfo(okMsg);
+            } else {
+                statusBar()->clearMessage();
+                const QString err = message.isEmpty() ? tr("unknown error") : message;
+                m_log->appendError(tr("Storage SDO 0x%1:%2 failed: %3")
+                                   .arg(odIdx, 4, 16, QChar('0'))
+                                   .arg(sub)
+                                   .arg(err));
+                QMessageBox::warning(this, tr("Storage command failed"), err);
+            }
+        });
+
+    QMetaObject::invokeMethod(m_worker, "customSdoWrite", Qt::QueuedConnection,
+                              Q_ARG(int, idx),
+                              Q_ARG(uint16_t, odIdx),
+                              Q_ARG(uint8_t, sub),
+                              Q_ARG(QByteArray, payload));
 }
 
 void MainWindow::onEditMotorProfile()
 {
-    /* Load the profile from the selected slave first, then open the editor on
-     * the fresh values. With no slave selected, edit the cached/JSON profile. */
-    int sel = -1;
-    {
-        const auto rows = m_table->selectionModel()
-                              ? m_table->selectionModel()->selectedRows()
-                              : QModelIndexList{};
-        if (!rows.isEmpty()){
-            sel = m_model->index(rows.first().row(), SlaveTableModel::ColIdx)
-                      .data().toInt();
-        }
-    }
+    /* Load the profile from the selected slave first, then open the editor
+     * on the fresh values. With no slave selected, the editor opens with
+     * whatever was last cached -- the user can still pick a slave and use
+     * the in-dialog "Read from drive" button to refresh. */
+    const int sel = selectedSlaveIdx();
     if (sel >= 0 && m_worker){
         m_profileEditPending = true;
         m_log->appendInfo(tr("reading motor profile from slave %1…").arg(sel));
@@ -1070,7 +1048,29 @@ void MainWindow::openMotorProfileEditor()
 {
     MotorProfileEditor dlg(this);
     dlg.setParams(m_motorParams);
-    if (dlg.exec() != QDialog::Accepted){ return; }
+
+    const int sel = selectedSlaveIdx();
+    dlg.setSlaveContext(sel);
+
+    /* Wire the Read button: editor → worker → editor.setParams.
+     * The connections are scoped to this dialog exec(); QDialog::exec()
+     * runs a nested event loop, so signal/slot dispatch works normally. */
+    auto rcRead = connect(&dlg, &MotorProfileEditor::readRequested, this,
+        [this](int slaveIdx){
+            QMetaObject::invokeMethod(m_worker, "readMotorProfile",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(int, slaveIdx));
+        });
+    auto rcResult = connect(m_worker, &MasterWorker::motorProfileRead, &dlg,
+        [&dlg](int /*idx*/, vrmc::MotorParams mp, bool ok, QString /*msg*/){
+            if (ok) dlg.setParams(mp);
+        });
+
+    const int rc = dlg.exec();
+    disconnect(rcRead);
+    disconnect(rcResult);
+    if (rc != QDialog::Accepted){ return; }
+
     m_motorParams = dlg.params();
     m_profileView->setParams(m_motorParams);
     pushProfileToTuning();
@@ -1085,24 +1085,34 @@ void MainWindow::openMotorProfileEditor()
                           .arg(m_motorParams.inertia,    0, 'g', 4));
     pushScalingToWorker();
 
-    /* OK also writes the profile to the selected drive (0x2070 + rated
-     * torque/current) via SDO. No selection -> file/local update only. */
-    int sel = -1;
-    const auto rows = m_table->selectionModel()
-                          ? m_table->selectionModel()->selectedRows()
-                          : QModelIndexList{};
-    if (!rows.isEmpty()){
-        sel = m_model->index(rows.first().row(), SlaveTableModel::ColIdx)
-                  .data().toInt();
+    if (sel < 0){
+        m_log->appendInfo(tr("no slave selected — profile cached locally only "
+                             "(not written to a drive)"));
+        return;
     }
-    if (sel >= 0){
-        QMetaObject::invokeMethod(m_worker, "writeMotorProfile",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(int, sel),
-                                  Q_ARG(vrmc::MotorParams, m_motorParams));
-    } else {
-        m_log->appendInfo(tr("no slave selected — profile not written to a drive"));
-    }
+
+    /* Save = write 0x2070 + 0x6075 (live OD) AND fire 0x1010:01 = "save"
+     * so the new profile lands in flash. Same magic value the Drive
+     * Config dialog's Save button uses; serialized through the worker's
+     * mutex so the storage SDO can't race the profile write. */
+    QMetaObject::invokeMethod(m_worker, "writeMotorProfile",
+                              Qt::QueuedConnection,
+                              Q_ARG(int, sel),
+                              Q_ARG(vrmc::MotorParams, m_motorParams));
+
+    QByteArray payload(4, '\0');
+    constexpr uint32_t kMagicSave = 0x65766173u;
+    payload[0] = char( kMagicSave        & 0xFFu);
+    payload[1] = char((kMagicSave >> 8 ) & 0xFFu);
+    payload[2] = char((kMagicSave >> 16) & 0xFFu);
+    payload[3] = char((kMagicSave >> 24) & 0xFFu);
+    QMetaObject::invokeMethod(m_worker, "customSdoWrite",
+                              Qt::QueuedConnection,
+                              Q_ARG(int, sel),
+                              Q_ARG(uint16_t, 0x1010),
+                              Q_ARG(uint8_t,  0x01),
+                              Q_ARG(QByteArray, payload));
+    m_log->appendInfo(tr("profile written to slave %1 + 0x1010:01 = save").arg(sel));
 }
 
 void MainWindow::pushProfileToTuning()
@@ -1149,17 +1159,41 @@ void MainWindow::pushScalingToWorker()
  *  Drive menu
  * ==================================================================== */
 
-void MainWindow::onSaveConfigToFlash()   { notImplemented(tr("Save Config to Flash")); }
-void MainWindow::onLoadConfigFromFlash() { notImplemented(tr("Load Config from Flash")); }
-
+/* Drive ▸ Restore Default Parameters…
+ *
+ * Sole storage shortcut left on the Drive menu (Save / Load Config to
+ * Flash removed -- those duplicated the per-dialog Save button and the
+ * Storage tab inside Configure Drive). This is the destructive path,
+ * kept on the menu because the granular Restore buttons in the Storage
+ * tab take 3 clicks to reach and a factory reset deserves an explicit
+ * top-level shortcut.
+ *
+ * Magic-guarded SDO write to 0x1011:01 with "load" (0x64616F6C). The
+ * board ERASES both blobs synchronously; defaults DO NOT apply live --
+ * the user must power-cycle / NMT-reset for the boot init path to seed
+ * the factory defaults back into RAM. The confirmation + the post-
+ * success message say so. */
 void MainWindow::onFactoryReset()
 {
+    if (selectedSlaveIdx() < 0){
+        QMessageBox::information(this, tr("Restore Default Parameters"),
+            tr("Select a slave in the table first."));
+        return;
+    }
     const auto btn = QMessageBox::warning(
-        this, tr("Factory reset"),
-        tr("This will restore the drive to factory defaults. Continue?"),
+        this, tr("Restore Default Parameters"),
+        tr("This will erase BOTH parameter blobs on the selected drive:\n"
+           "  • app_params (node id, calibrations, gear ratio, encoder offset)\n"
+           "  • motor_drive_params (PI gains, limits, motor profile, current cal)\n\n"
+           "The live motor keeps its current gains. Defaults take effect on "
+           "the next power-on or NMT reset. Continue?"),
         QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
     if (btn != QMessageBox::Ok){ return; }
-    notImplemented(tr("Factory reset"));
+
+    sendStorageCommand(/*odIdx*/0x1011, /*sub*/0x01, /*magic*/0x64616F6Cu,
+                       tr("Erasing parameter blobs…"),
+                       tr("Parameter blobs erased — power-cycle the drive to "
+                          "load factory defaults."));
 }
 
 void MainWindow::onUploadFirmware()
@@ -1283,6 +1317,12 @@ void MainWindow::onConfigureDrive()
                 m_worker,      &MasterWorker::customSdoRead,
                 Qt::QueuedConnection);
         connect(m_driveCfgDlg, &DriveConfigDialog::customSdoWriteRequested,
+                m_worker,      &MasterWorker::customSdoWrite,
+                Qt::QueuedConnection);
+        /* Storage tab buttons (0x1010/0x1011) share the customSdoWrite
+         * wire shape — same slot, same response signal. The dialog
+         * routes the result back via the customSdoDone fan-out below. */
+        connect(m_driveCfgDlg, &DriveConfigDialog::storageCommandRequested,
                 m_worker,      &MasterWorker::customSdoWrite,
                 Qt::QueuedConnection);
         connect(m_worker,      &MasterWorker::customSdoDone,

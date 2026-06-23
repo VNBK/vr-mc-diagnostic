@@ -110,40 +110,44 @@ DriveConfigDialog::DriveConfigDialog(QWidget* parent) : QDialog(parent)
     m_header->setStyleSheet(QStringLiteral("font-weight: 600;"));
 
     auto* tabs = new QTabWidget(this);
-    auto* tHoming  = new QWidget;
-    auto* tMotion  = new QWidget;
-    auto* tProtect = new QWidget;
-    auto* tManuf   = new QWidget;
+    auto* tApp     = new QWidget;
+    auto* tMotor   = new QWidget;
+    auto* tRuntime = new QWidget;
     auto* tCustom  = new QWidget;
-    buildHomingTab      (tHoming);
-    buildMotionTab      (tMotion);
-    buildProtectTab     (tProtect);
-    buildManufacturerTab(tManuf);
-    buildCustomTab      (tCustom);
-    tabs->addTab(tHoming,  tr("Homing"));
-    tabs->addTab(tMotion,  tr("Motion profile"));
-    tabs->addTab(tProtect, tr("Protection"));
-    tabs->addTab(tManuf,   tr("Manufacturer"));
+    auto* tStorage = new QWidget;
+    buildAppTab    (tApp);
+    buildMotorTab  (tMotor);
+    buildRuntimeTab(tRuntime);
+    buildCustomTab (tCustom);
+    buildStorageTab(tStorage);
+    tabs->addTab(tApp,     tr("App parameters"));
+    tabs->addTab(tMotor,   tr("Motor parameters"));
+    tabs->addTab(tRuntime, tr("Runtime"));
     tabs->addTab(tCustom,  tr("Custom SDO"));
+    tabs->addTab(tStorage, tr("Storage"));
 
-    m_readBtn  = new QPushButton(tr("Read from drive"), this);
-    m_applyBtn = new QPushButton(tr("Apply"), this);
-    connect(m_readBtn,  &QPushButton::clicked,
-            this,       &DriveConfigDialog::onReadClicked);
-    connect(m_applyBtn, &QPushButton::clicked,
-            this,       &DriveConfigDialog::onApplyClicked);
+    m_readBtn = new QPushButton(tr("Read from drive"), this);
+    m_readBtn->setToolTip(tr("Re-fetch every field from the drive's OD."));
+    m_saveBtn = new QPushButton(tr("Save"), this);
+    m_saveBtn->setToolTip(
+        tr("Write all fields to the drive (live) AND commit the App + Motor "
+           "blobs to flash (0x1010:01 = save). One click, fully persisted."));
+    connect(m_readBtn, &QPushButton::clicked,
+            this,      &DriveConfigDialog::onReadClicked);
+    connect(m_saveBtn, &QPushButton::clicked,
+            this,      &DriveConfigDialog::onSaveClicked);
 
     m_buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(m_buttons, &QDialogButtonBox::accepted, this, [this]{
-        onApplyClicked();
+        onSaveClicked();   /* OK = Save + close */
         accept();
     });
     connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto* actionRow = new QHBoxLayout;
     actionRow->addWidget(m_readBtn);
-    actionRow->addWidget(m_applyBtn);
+    actionRow->addWidget(m_saveBtn);
     actionRow->addStretch(1);
 
     auto* root = new QVBoxLayout(this);
@@ -187,166 +191,164 @@ void DriveConfigDialog::fitTabsToLargest()
     }
 }
 
-void DriveConfigDialog::buildHomingTab(QWidget* host)
-{
-    auto* root = new QVBoxLayout(host);
-
-    auto* formWrap = new QWidget(host);
-    auto* form = new QFormLayout(formWrap);
-    form->setContentsMargins(0, 0, 0, 0);
-    m_homingMethod = new QComboBox;
-    for (const auto& m : kHomingMethods){
-        /* fromUtf8 handles both ASCII and any future multibyte glyphs;
-         * fromLatin1 silently mangled the em-dash variants. */
-        m_homingMethod->addItem(QString::fromUtf8(m.label), int(m.value));
-    }
-    m_homeOffset  = makeDSpin(-1e6, 1e6, 4, tr("rad"));
-    m_homingFast  = makeDSpin(0, 1e4, 3, tr("rad/s"));
-    m_homingSlow  = makeDSpin(0, 1e4, 3, tr("rad/s"));
-    m_homingAccel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
-
-    form->addRow(tr("Method (0x6098)"),       m_homingMethod);
-    form->addRow(tr("Home offset (0x607C)"),  m_homeOffset);
-    form->addRow(tr("Switch search speed (0x6099:1)"), m_homingFast);
-    form->addRow(tr("Zero search speed  (0x6099:2)"),  m_homingSlow);
-    form->addRow(tr("Homing acceleration (0x609A)"),   m_homingAccel);
-    root->addWidget(formWrap);
-
-    /* Commissioning actions live below the form — writing the config
-     * tweaks the params, these buttons actually kick things off. */
-    m_startHomingBtn = new QPushButton(tr("Start Homing"), host);
-    m_startHomingBtn->setToolTip(
-        tr("Switch drive to mode 6 and pulse controlword bit 4 to start\n"
-           "the homing procedure. Requires the drive to be Enabled first."));
-    m_zeroEncBtn = new QPushButton(tr("Zero encoder here"), host);
-    m_zeroEncBtn->setToolTip(
-        tr("Capture position_actual (0x6064) and write it into\n"
-           "home_offset (0x607C). Makes \"here\" the new origin."));
-    connect(m_startHomingBtn, &QPushButton::clicked,
-            this,             &DriveConfigDialog::onStartHomingClicked);
-    connect(m_zeroEncBtn,     &QPushButton::clicked,
-            this,             &DriveConfigDialog::onZeroEncoderClicked);
-
-    auto* actRow = new QHBoxLayout;
-    actRow->addWidget(m_startHomingBtn);
-    actRow->addWidget(m_zeroEncBtn);
-    actRow->addStretch(1);
-    root->addLayout(actRow);
-
-    m_homingState = new QLabel(tr("Homing: —"), host);
-    m_homingState->setStyleSheet(QStringLiteral(
-        "QLabel { padding: 6px 8px; border: 1px solid #666;"
-        "         border-radius: 4px; background: #1a1a1a; color: #ddd; }"));
-    root->addWidget(m_homingState);
-    root->addStretch(1);
-}
-
-void DriveConfigDialog::buildMotionTab(QWidget* host)
-{
-    auto* form = new QFormLayout(host);
-    m_profileVel     = makeDSpin(0, 1e4, 3, tr("rad/s"));
-    m_profileAccel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
-    m_profileDecel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
-    m_quickstopDecel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
-    form->addRow(tr("Profile velocity (0x6081)"),     m_profileVel);
-    form->addRow(tr("Profile acceleration (0x6083)"), m_profileAccel);
-    form->addRow(tr("Profile deceleration (0x6084)"), m_profileDecel);
-    form->addRow(tr("Quickstop deceleration (0x6085)"), m_quickstopDecel);
-}
-
-void DriveConfigDialog::buildProtectTab(QWidget* host)
-{
-    auto* root = new QVBoxLayout(host);
-
-    auto* formWrap = new QWidget(host);
-    auto* form = new QFormLayout(formWrap);
-    form->setContentsMargins(0, 0, 0, 0);
-    m_followingError = makeDSpin(0, 1e6, 4, tr("rad"));
-    m_followingMs    = makeSpin(0, 60000, 100, tr("ms"));
-    m_posMin         = makeDSpin(-1e6, 1e6, 4, tr("rad"));
-    m_posMax         = makeDSpin(-1e6, 1e6, 4, tr("rad"));
-    m_maxSpeed       = makeDSpin(0, 1e4, 3, tr("rad/s"));
-    m_maxTorque      = makeDSpin(0, 1e4, 4, tr("Nm"));
-    m_ratedTorque    = makeDSpin(0, 1e4, 4, tr("Nm"));
-    /* 0x6076 is derived (= Kt * rated current) and read-only on the drive;
-     * show it but don't let the user edit/write it. */
-    m_ratedTorque->setReadOnly(true);
-    m_ratedTorque->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    m_ratedCurrent   = makeDSpin(0, 1e4, 3, tr("A"));
-    /* Protection: stall trip (vendor 0x2050). Current actual moved to
-     * the telemetry graph; encoder resolution moved to Manufacturer. */
-    m_stallCurrent = makeSpin(0, 1'000'000, 0, tr("mA"));
-    m_stallTime    = makeSpin(0, 60000,     0, tr("ms"));
-
-    form->addRow(tr("Max following error (0x6065)"), m_followingError);
-    form->addRow(tr("Following error time (0x6066)"), m_followingMs);
-    form->addRow(tr("Pos limit min (0x607D:1)"),      m_posMin);
-    form->addRow(tr("Pos limit max (0x607D:2)"),      m_posMax);
-    form->addRow(tr("Max motor speed (0x6080)"),      m_maxSpeed);
-    form->addRow(tr("Max torque (0x6072)"),           m_maxTorque);
-    form->addRow(tr("Rated torque (0x6076, derived)"), m_ratedTorque);
-    form->addRow(tr("Rated current (0x6075)"),        m_ratedCurrent);
-    form->addRow(tr("Stall current (0x2050:1)"),      m_stallCurrent);
-    form->addRow(tr("Stall time (0x2050:2)"),         m_stallTime);
-    root->addWidget(formWrap);
-
-    m_zeroTorqueBtn = new QPushButton(tr("Zero torque here"), host);
-    m_zeroTorqueBtn->setToolTip(
-        tr("Capture torque_actual (0x6077) and write it into\n"
-           "torque_offset (0x60B2) so the current loading reads as 0."));
-    connect(m_zeroTorqueBtn, &QPushButton::clicked,
-            this,            &DriveConfigDialog::onZeroTorqueClicked);
-    auto* row = new QHBoxLayout;
-    row->addWidget(m_zeroTorqueBtn);
-    row->addStretch(1);
-    root->addLayout(row);
-
-    m_torqueState = new QLabel(tr("Torque: —"), host);
-    m_torqueState->setStyleSheet(QStringLiteral(
-        "QLabel { padding: 6px 8px; border: 1px solid #666;"
-        "         border-radius: 4px; background: #1a1a1a; color: #ddd; }"));
-    root->addWidget(m_torqueState);
-    root->addStretch(1);
-}
-
-/* ------------------------------------------------------------ Manufacturer
+/* ============================================================ App tab
  *
- * Vendor-range (0x20xx) objects: Node ID (0x2000:01), per-phase current
- * sensor calibration (offsets 0x2040 + gains 0x2041, RW), Hall offset
- * (0x2060), and the motor-profile electrical record (0x2070). PID loop
- * gains are on the Gains tab (standard 0x60F6/0x60F9/0x60FB). */
-void DriveConfigDialog::buildManufacturerTab(QWidget* host)
+ * All fields here are persisted in the app_params_t blob (data-flash).
+ * Save = Storage tab :04 (app-only) OR :01 (all). Layout matches the
+ * board struct: identity / mechanical / sensor cal. Commissioning
+ * actions that mutate App-blob fields (zero-encoder writes 0x607C)
+ * live with the field they modify. */
+void DriveConfigDialog::buildAppTab(QWidget* host)
 {
     auto* root = new QVBoxLayout(host);
 
-    auto makeDoubleSpin = [host](double lo, double hi, double v, int dec){
-        auto* s = new QDoubleSpinBox(host);
-        s->setRange(lo, hi);
-        s->setDecimals(dec);
-        s->setValue(v);
-        s->setAlignment(Qt::AlignRight);
-        return s;
-    };
-
-    /* --- Node + identity --- */
+    /* --- Identity --- */
     auto* idBox = new QGroupBox(tr("Identity"), host);
     {
         auto* form = new QFormLayout(idBox);
-        m_mfNodeId = makeSpin(1, 127, 5);  /* CANopen node IDs are 1..127 */
+        m_mfNodeId = makeSpin(1, 127, 5);
         form->addRow(tr("Node ID (0x2000:01)"), m_mfNodeId);
     }
     root->addWidget(idBox);
 
-    /* --- Per-phase current sensor calibration (writable) --- */
-    auto* phaseBox = new QGroupBox(tr("Current sensor calibration"), host);
+    /* --- Mechanical (home offset, gear, encoder) --- */
+    auto* mechBox = new QGroupBox(tr("Mechanical"), host);
     {
-        auto* form = new QFormLayout(phaseBox);
-        m_mfCurOffA  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
-        m_mfCurOffB  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
-        m_mfCurOffC  = makeDoubleSpin(-1e6, 1e6, 0.0, 4);
-        m_mfCurGainA = makeDoubleSpin(0.0, 1e6, 1.0, 4);
-        m_mfCurGainB = makeDoubleSpin(0.0, 1e6, 1.0, 4);
-        m_mfCurGainC = makeDoubleSpin(0.0, 1e6, 1.0, 4);
+        auto* form = new QFormLayout(mechBox);
+        m_homeOffset = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+        m_encInc     = makeSpin(1, 1'000'000'000, 16384, tr("inc"));
+        m_encRevs    = makeSpin(1, 1'000'000,     1,     tr("rev"));
+        m_gearMotor  = makeSpin(1, 1'000'000, 1, tr("rev"));
+        m_gearShaft  = makeSpin(1, 1'000'000, 1, tr("rev"));
+
+        form->addRow(tr("Home offset (0x607C)"),          m_homeOffset);
+        form->addRow(tr("Gear motor revs (0x6091:1)"),    m_gearMotor);
+        form->addRow(tr("Gear shaft revs (0x6091:2)"),    m_gearShaft);
+        form->addRow(tr("Encoder increments (0x608F:1)"), m_encInc);
+        form->addRow(tr("Motor revolutions (0x608F:2)"),  m_encRevs);
+
+        m_zeroEncBtn = new QPushButton(tr("Zero encoder here"), mechBox);
+        m_zeroEncBtn->setToolTip(
+            tr("Capture position_actual (0x6064) and write it into\n"
+               "home_offset (0x607C). Makes \"here\" the new origin."));
+        connect(m_zeroEncBtn, &QPushButton::clicked,
+                this,         &DriveConfigDialog::onZeroEncoderClicked);
+        auto* row = new QHBoxLayout;
+        row->addWidget(m_zeroEncBtn);
+        row->addStretch(1);
+        form->addRow(QString(), row);
+    }
+    root->addWidget(mechBox);
+
+    /* --- Sensor calibration --- */
+    auto* sensBox = new QGroupBox(tr("Sensor calibration"), host);
+    {
+        auto* form = new QFormLayout(sensBox);
+        m_mfHallOffset = new QDoubleSpinBox(sensBox);
+        m_mfHallOffset->setRange(-7.0, 7.0);
+        m_mfHallOffset->setDecimals(5);
+        m_mfHallOffset->setValue(0.0);
+        m_mfHallOffset->setAlignment(Qt::AlignRight);
+        m_mfHallOffset->setSuffix(tr(" rad"));
+        form->addRow(tr("Hall offset (0x2060)"), m_mfHallOffset);
+
+        auto* tmagNote = new QLabel(
+            tr("TMAG6180 sin/cos cal is run as a one-shot via "
+               "0x2031:01 = 3 (Custom SDO tab), not edited per-field here."),
+            sensBox);
+        tmagNote->setWordWrap(true);
+        tmagNote->setStyleSheet(QStringLiteral(
+            "QLabel { color: #9aa; padding: 2px 4px; }"));
+        form->addRow(QString(), tmagNote);
+    }
+    root->addWidget(sensBox);
+
+    auto* hint = new QLabel(
+        tr("💾 Persisted in <b>app_params</b> blob (data-flash). "
+           "Save via Storage tab → <i>Save App (:04)</i> or "
+           "<i>Save All (:01)</i>, or just click <b>Save</b> below."),
+        host);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral(
+        "QLabel { color: #9ad8a8; padding: 4px; border-top: 1px solid #333; }"));
+    root->addWidget(hint);
+    root->addStretch(1);
+}
+
+/* ============================================================ Motor tab
+ *
+ * All fields here are persisted in the motor_drive_params_t blob
+ * (code-flash). Save = Storage tab :05 (motor-only) OR :01 (all).
+ * Layout: limits / rated / current sense / fault thresholds. Cross-
+ * references to Motor Profile editor + Gains tab at the bottom. */
+void DriveConfigDialog::buildMotorTab(QWidget* host)
+{
+    auto* root = new QVBoxLayout(host);
+
+    /* --- Motion limits --- */
+    auto* limBox = new QGroupBox(tr("Motion limits"), host);
+    {
+        auto* form = new QFormLayout(limBox);
+        m_posMin    = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+        m_posMax    = makeDSpin(-1e6, 1e6, 4, tr("rad"));
+        m_maxSpeed  = makeDSpin(0, 1e4, 3, tr("rad/s"));
+        m_maxTorque = makeDSpin(0, 1e4, 4, tr("Nm"));
+        form->addRow(tr("Pos limit min (0x607D:1)"), m_posMin);
+        form->addRow(tr("Pos limit max (0x607D:2)"), m_posMax);
+        form->addRow(tr("Max motor speed (0x6080)"), m_maxSpeed);
+        form->addRow(tr("Max torque (0x6072)"),      m_maxTorque);
+    }
+    root->addWidget(limBox);
+
+    /* --- Rated values --- */
+    auto* rateBox = new QGroupBox(tr("Rated values"), host);
+    {
+        auto* form = new QFormLayout(rateBox);
+        m_ratedCurrent = makeDSpin(0, 1e4, 3, tr("A"));
+        m_ratedTorque  = makeDSpin(0, 1e4, 4, tr("Nm"));
+        /* 0x6076 is derived (= Kt * rated_current) and RO on the drive. */
+        m_ratedTorque->setReadOnly(true);
+        m_ratedTorque->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        form->addRow(tr("Rated current (0x6075)"),         m_ratedCurrent);
+        form->addRow(tr("Rated torque (0x6076, derived)"), m_ratedTorque);
+
+        m_zeroTorqueBtn = new QPushButton(tr("Zero torque here"), rateBox);
+        m_zeroTorqueBtn->setToolTip(
+            tr("Capture torque_actual (0x6077) and write it into\n"
+               "torque_offset (0x60B2) so the current loading reads as 0."));
+        connect(m_zeroTorqueBtn, &QPushButton::clicked,
+                this,            &DriveConfigDialog::onZeroTorqueClicked);
+        auto* row = new QHBoxLayout;
+        row->addWidget(m_zeroTorqueBtn);
+        row->addStretch(1);
+        form->addRow(QString(), row);
+
+        m_torqueState = new QLabel(tr("Torque: —"), rateBox);
+        m_torqueState->setStyleSheet(QStringLiteral(
+            "QLabel { padding: 6px 8px; border: 1px solid #666;"
+            "         border-radius: 4px; background: #1a1a1a; color: #ddd; }"));
+        form->addRow(QString(), m_torqueState);
+    }
+    root->addWidget(rateBox);
+
+    /* --- Current sensor calibration --- */
+    auto* csBox = new QGroupBox(tr("Current sensor calibration"), host);
+    {
+        auto makeCS = [csBox](double lo, double hi, double v, int dec){
+            auto* s = new QDoubleSpinBox(csBox);
+            s->setRange(lo, hi);
+            s->setDecimals(dec);
+            s->setValue(v);
+            s->setAlignment(Qt::AlignRight);
+            return s;
+        };
+        auto* form = new QFormLayout(csBox);
+        m_mfCurOffA  = makeCS(-1e6, 1e6, 0.0, 4);
+        m_mfCurOffB  = makeCS(-1e6, 1e6, 0.0, 4);
+        m_mfCurOffC  = makeCS(-1e6, 1e6, 0.0, 4);
+        m_mfCurGainA = makeCS(0.0, 1e6, 1.0, 4);
+        m_mfCurGainB = makeCS(0.0, 1e6, 1.0, 4);
+        m_mfCurGainC = makeCS(0.0, 1e6, 1.0, 4);
         form->addRow(tr("Current offset A (0x2040:1)"), m_mfCurOffA);
         form->addRow(tr("Current offset B (0x2040:2)"), m_mfCurOffB);
         form->addRow(tr("Current offset C (0x2040:3)"), m_mfCurOffC);
@@ -354,30 +356,120 @@ void DriveConfigDialog::buildManufacturerTab(QWidget* host)
         form->addRow(tr("Current gain B (0x2041:2)"),   m_mfCurGainB);
         form->addRow(tr("Current gain C (0x2041:3)"),   m_mfCurGainC);
     }
-    root->addWidget(phaseBox);
+    root->addWidget(csBox);
 
-    /* --- Commutation + encoder resolution --- */
-    auto* commBox = new QGroupBox(tr("Commutation / encoder"), host);
+    /* --- Fault thresholds --- */
+    auto* faultBox = new QGroupBox(tr("Fault thresholds"), host);
     {
-        auto* form = new QFormLayout(commBox);
-        m_mfHallOffset = makeDoubleSpin(-7.0, 7.0, 0.0, 5);
-        m_mfHallOffset->setSuffix(tr(" rad"));
-        m_encInc  = makeSpin(1, 1'000'000'000, 16384, tr("inc"));
-        m_encRevs = makeSpin(1, 1'000'000,     1,     tr("rev"));
-        form->addRow(tr("Hall offset (0x2060)"),          m_mfHallOffset);
-        form->addRow(tr("Encoder increments (0x608F:1)"), m_encInc);
-        form->addRow(tr("Motor revolutions (0x608F:2)"),  m_encRevs);
+        auto* form = new QFormLayout(faultBox);
+        m_stallCurrent = makeSpin(0, 1'000'000, 0, tr("mA"));
+        m_stallTime    = makeSpin(0, 60000,     0, tr("ms"));
+        form->addRow(tr("Stall current (0x2050:1)"), m_stallCurrent);
+        form->addRow(tr("Stall time (0x2050:2)"),    m_stallTime);
     }
-    root->addWidget(commBox);
+    root->addWidget(faultBox);
 
-    auto* note = new QLabel(
-        tr("Motor profile (type, Rs, Ls, flux, …) is on the <b>Motor "
-           "Profile</b> editor — its OK writes 0x2070 to the selected "
-           "drive. PID loop gains are on the <b>Gains</b> tab "
-           "(0x60F6 / 0x60F9 / 0x60FB)."), host);
-    note->setWordWrap(true);
-    note->setStyleSheet(QStringLiteral("QLabel { color: #9aa; padding: 4px; }"));
-    root->addWidget(note);
+    auto* xref = new QLabel(
+        tr("Related editors that also write to this blob:<br>"
+           "• <b>Motor Profile</b> editor → writes 0x2070 (Rs, Ls, Kt, J, …)<br>"
+           "• <b>Gains</b> tab → writes 0x60F6 / 0x60F9 / 0x60FB"),
+        host);
+    xref->setWordWrap(true);
+    xref->setStyleSheet(QStringLiteral("QLabel { color: #9aa; padding: 4px; }"));
+    root->addWidget(xref);
+
+    auto* hint = new QLabel(
+        tr("💾 Persisted in <b>motor_drive_params</b> blob (code-flash). "
+           "Save via Storage tab → <i>Save Motor (:05)</i> or "
+           "<i>Save All (:01)</i>, or just click <b>Save</b> below."),
+        host);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral(
+        "QLabel { color: #9ad8a8; padding: 4px; border-top: 1px solid #333; }"));
+    root->addWidget(hint);
+    root->addStretch(1);
+}
+
+/* ============================================================ Runtime tab
+ *
+ * Fields here are NOT persisted in any flash blob — they live in the
+ * drive's OD RAM only, and reset to defaults on power-cycle / NMT
+ * reset. Includes the Homing FSM start action (also transient). */
+void DriveConfigDialog::buildRuntimeTab(QWidget* host)
+{
+    auto* root = new QVBoxLayout(host);
+
+    /* --- Homing --- */
+    auto* homeBox = new QGroupBox(tr("Homing"), host);
+    {
+        auto* form = new QFormLayout(homeBox);
+        m_homingMethod = new QComboBox(homeBox);
+        for (const auto& m : kHomingMethods){
+            m_homingMethod->addItem(QString::fromUtf8(m.label), int(m.value));
+        }
+        m_homingFast  = makeDSpin(0, 1e4, 3, tr("rad/s"));
+        m_homingSlow  = makeDSpin(0, 1e4, 3, tr("rad/s"));
+        m_homingAccel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+        form->addRow(tr("Method (0x6098)"),                m_homingMethod);
+        form->addRow(tr("Switch search speed (0x6099:1)"), m_homingFast);
+        form->addRow(tr("Zero search speed  (0x6099:2)"),  m_homingSlow);
+        form->addRow(tr("Homing acceleration (0x609A)"),   m_homingAccel);
+
+        m_startHomingBtn = new QPushButton(tr("Start Homing"), homeBox);
+        m_startHomingBtn->setToolTip(
+            tr("Switch drive to mode 6 and pulse controlword bit 4 to start\n"
+               "the homing procedure. Requires the drive to be Enabled first."));
+        connect(m_startHomingBtn, &QPushButton::clicked,
+                this,             &DriveConfigDialog::onStartHomingClicked);
+        auto* row = new QHBoxLayout;
+        row->addWidget(m_startHomingBtn);
+        row->addStretch(1);
+        form->addRow(QString(), row);
+
+        m_homingState = new QLabel(tr("Homing: —"), homeBox);
+        m_homingState->setStyleSheet(QStringLiteral(
+            "QLabel { padding: 6px 8px; border: 1px solid #666;"
+            "         border-radius: 4px; background: #1a1a1a; color: #ddd; }"));
+        form->addRow(QString(), m_homingState);
+    }
+    root->addWidget(homeBox);
+
+    /* --- Motion profile --- */
+    auto* motBox = new QGroupBox(tr("Motion profile"), host);
+    {
+        auto* form = new QFormLayout(motBox);
+        m_profileVel     = makeDSpin(0, 1e4, 3, tr("rad/s"));
+        m_profileAccel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+        m_profileDecel   = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+        m_quickstopDecel = makeDSpin(0, 1e6, 1, tr("rad/s²"));
+        form->addRow(tr("Profile velocity (0x6081)"),       m_profileVel);
+        form->addRow(tr("Profile acceleration (0x6083)"),   m_profileAccel);
+        form->addRow(tr("Profile deceleration (0x6084)"),   m_profileDecel);
+        form->addRow(tr("Quickstop deceleration (0x6085)"), m_quickstopDecel);
+    }
+    root->addWidget(motBox);
+
+    /* --- Following error --- */
+    auto* feBox = new QGroupBox(tr("Following error"), host);
+    {
+        auto* form = new QFormLayout(feBox);
+        m_followingError = makeDSpin(0, 1e6, 4, tr("rad"));
+        m_followingMs    = makeSpin(0, 60000, 100, tr("ms"));
+        form->addRow(tr("Max following error (0x6065)"), m_followingError);
+        form->addRow(tr("Following error time (0x6066)"), m_followingMs);
+    }
+    root->addWidget(feBox);
+
+    auto* hint = new QLabel(
+        tr("⚠ <b>Not persisted</b>. These OD entries live in the drive's "
+           "RAM only and reset to defaults on the next power-cycle / NMT "
+           "reset. <b>Save</b> writes them live but they will NOT survive "
+           "a reboot."),
+        host);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral(
+        "QLabel { color: #d8c89a; padding: 4px; border-top: 1px solid #333; }"));
+    root->addWidget(hint);
     root->addStretch(1);
 }
 
@@ -479,29 +571,163 @@ void DriveConfigDialog::onCustomSdoDone(int idx, bool isWrite,
                                         bool ok, const QString& valueDecoded,
                                         const QString& message)
 {
-    /* Result lines are intentionally verbose so the operator can copy
-     * them into a bug report without losing context. */
-    if (idx != m_slaveIdx || !m_customResult){ return; }
+    if (idx != m_slaveIdx){ return; }
+
+    /* 0x1010 / 0x1011 commands land on the Storage tab; everything else
+     * on the Custom SDO tab. The two paths share the customSdoDone
+     * signal because the Storage tab piggybacks customSdoWrite under
+     * the hood (same wire shape, same worker slot). */
+    const bool isStorage = (odIdx == 0x1010 || odIdx == 0x1011);
+    QLabel* target = isStorage ? m_storageStatus : m_customResult;
+    if (!target) return;
+
     const QString head = QStringLiteral("0x%1.%2 %3")
         .arg(odIdx, 4, 16, QChar('0'))
         .arg(sub,   2, 16, QChar('0'))
         .arg(isWrite ? QStringLiteral("WRITE") : QStringLiteral("READ"));
     if (ok){
         const QString body = isWrite
-            ? tr("OK")
+            ? (isStorage && odIdx == 0x1011
+                  ? tr("OK — blob erased; power-cycle to load defaults.")
+                  : tr("OK"))
             : tr("OK  →  %1").arg(valueDecoded);
-        m_customResult->setStyleSheet(QStringLiteral(
+        target->setStyleSheet(QStringLiteral(
             "QLabel { font-family: monospace; padding: 6px 8px; "
             "         border: 1px solid #3c6e3c; border-radius: 4px; "
             "         background: #14301a; color: #aed8ae; }"));
-        m_customResult->setText(QStringLiteral("%1: %2").arg(head, body));
+        target->setText(QStringLiteral("%1: %2").arg(head, body));
     } else {
-        m_customResult->setStyleSheet(QStringLiteral(
+        target->setStyleSheet(QStringLiteral(
             "QLabel { font-family: monospace; padding: 6px 8px; "
             "         border: 1px solid #8a1a1a; border-radius: 4px; "
             "         background: #2a1010; color: #ff9090; }"));
-        m_customResult->setText(QStringLiteral("%1 FAILED: %2").arg(head, message));
+        target->setText(QStringLiteral("%1 FAILED: %2").arg(head, message));
     }
+}
+
+/* ---------------------------------------------------------------- Storage
+ *
+ * CiA-301 0x1010 (Save) / 0x1011 (Restore) buttons. Each button writes the
+ * spec magic value LE-encoded ("save" = 0x65766173, "load" = 0x64616F6C)
+ * to the matching subindex; board-side dispatch fans out to one or both
+ * persistence callbacks:
+ *
+ *   :01  both blobs (app_params + motor_drive_params)
+ *   :04  app_params only
+ *   :05  motor_drive_params only
+ *
+ * Restore wipes the blob -- defaults only take effect after a power-cycle
+ * / NMT reset. The Status label below paints success / failure with the
+ * last command's OD address and SDO outcome. */
+void DriveConfigDialog::buildStorageTab(QWidget* host)
+{
+    auto* root = new QVBoxLayout(host);
+
+    auto makeBtn = [host](const QString& text, uint16_t od, uint8_t sub){
+        auto* b = new QPushButton(text, host);
+        b->setProperty("od",  od);
+        b->setProperty("sub", sub);
+        b->setMinimumWidth(160);
+        return b;
+    };
+
+    /* --- Save group --- */
+    auto* saveBox = new QGroupBox(tr("Save to flash (0x1010)"), host);
+    {
+        auto* col = new QVBoxLayout(saveBox);
+        auto* intro = new QLabel(
+            tr("Commit the live OD values to flash. Synchronous: blocks "
+               "the slave's SDO server for ~20 ms per blob; the control "
+               "loop keeps running."), saveBox);
+        intro->setWordWrap(true);
+        intro->setStyleSheet(QStringLiteral("QLabel { color: #9aa; }"));
+        col->addWidget(intro);
+
+        m_saveAllBtn   = makeBtn(tr("Save All (:01)"),         0x1010, 0x01);
+        m_saveAppBtn   = makeBtn(tr("Save App params (:04)"),  0x1010, 0x04);
+        m_saveMotorBtn = makeBtn(tr("Save Motor params (:05)"), 0x1010, 0x05);
+
+        auto* row = new QHBoxLayout;
+        row->addWidget(m_saveAllBtn);
+        row->addWidget(m_saveAppBtn);
+        row->addWidget(m_saveMotorBtn);
+        row->addStretch(1);
+        col->addLayout(row);
+    }
+    root->addWidget(saveBox);
+
+    /* --- Restore group --- */
+    auto* restoreBox = new QGroupBox(tr("Restore defaults (0x1011)"), host);
+    {
+        auto* col = new QVBoxLayout(restoreBox);
+        auto* intro = new QLabel(
+            tr("Erase the flash blob. The live motor keeps its current "
+               "gains; <b>factory defaults take effect on the next "
+               "power-on or NMT reset</b>."), restoreBox);
+        intro->setWordWrap(true);
+        intro->setStyleSheet(QStringLiteral("QLabel { color: #c9a; }"));
+        col->addWidget(intro);
+
+        m_restoreAllBtn   = makeBtn(tr("Restore All (:01)"),         0x1011, 0x01);
+        m_restoreAppBtn   = makeBtn(tr("Restore App params (:04)"),  0x1011, 0x04);
+        m_restoreMotorBtn = makeBtn(tr("Restore Motor params (:05)"), 0x1011, 0x05);
+
+        auto* row = new QHBoxLayout;
+        row->addWidget(m_restoreAllBtn);
+        row->addWidget(m_restoreAppBtn);
+        row->addWidget(m_restoreMotorBtn);
+        row->addStretch(1);
+        col->addLayout(row);
+    }
+    root->addWidget(restoreBox);
+
+    /* --- Status line --- */
+    m_storageStatus = new QLabel(tr("Ready."), host);
+    m_storageStatus->setWordWrap(true);
+    m_storageStatus->setStyleSheet(QStringLiteral(
+        "QLabel { font-family: monospace; padding: 6px 8px; "
+        "         border: 1px solid #444; border-radius: 4px; "
+        "         background: #1a1a1a; color: #ccc; }"));
+    root->addWidget(m_storageStatus);
+    root->addStretch(1);
+
+    /* Restore buttons get a confirm dialog before firing -- this is the
+     * destructive path. Save buttons fire immediately. */
+    auto fire = [this](QPushButton* b, uint32_t magic, bool destructive){
+        connect(b, &QPushButton::clicked, this, [this, b, magic, destructive]{
+            if (m_slaveIdx < 0){
+                m_storageStatus->setText(tr("Select a slave first."));
+                return;
+            }
+            const uint16_t od  = uint16_t(b->property("od").toUInt());
+            const uint8_t  sub = uint8_t (b->property("sub").toUInt());
+            if (destructive){
+                const auto ans = QMessageBox::warning(
+                    this, tr("Restore defaults"),
+                    tr("This will erase the parameter blob on slave %1.\n\n"
+                       "The live motor keeps its current gains; defaults take "
+                       "effect on the next power-cycle / NMT reset.\n\n"
+                       "Continue?").arg(m_slaveIdx),
+                    QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+                if (ans != QMessageBox::Ok) return;
+            }
+            QByteArray payload(4, '\0');
+            payload[0] = char( magic        & 0xFFu);
+            payload[1] = char((magic >> 8 ) & 0xFFu);
+            payload[2] = char((magic >> 16) & 0xFFu);
+            payload[3] = char((magic >> 24) & 0xFFu);
+            m_storageStatus->setText(
+                tr("Sending 0x%1:%2 …")
+                    .arg(od, 4, 16, QChar('0')).arg(sub));
+            emit storageCommandRequested(m_slaveIdx, od, sub, payload);
+        });
+    };
+    fire(m_saveAllBtn,      0x65766173u, /*destructive=*/false);
+    fire(m_saveAppBtn,      0x65766173u, false);
+    fire(m_saveMotorBtn,    0x65766173u, false);
+    fire(m_restoreAllBtn,   0x64616F6Cu, /*destructive=*/true);
+    fire(m_restoreAppBtn,   0x64616F6Cu, true);
+    fire(m_restoreMotorBtn, 0x64616F6Cu, true);
 }
 
 void DriveConfigDialog::setSlaveContext(int idx, const QString& name)
@@ -511,14 +737,14 @@ void DriveConfigDialog::setSlaveContext(int idx, const QString& name)
     if (idx < 0){
         m_header->setText(tr("No slave selected."));
         m_readBtn->setEnabled(false);
-        m_applyBtn->setEnabled(false);
+        m_saveBtn->setEnabled(false);
         m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
     } else {
         m_header->setText(tr("Slave #%1 — %2")
                               .arg(idx)
                               .arg(name.isEmpty() ? tr("(unnamed)") : name));
         m_readBtn->setEnabled(true);
-        m_applyBtn->setEnabled(true);
+        m_saveBtn->setEnabled(true);
         m_buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
     }
 }
@@ -538,6 +764,8 @@ void DriveConfigDialog::setConfig(const DriveConfig& cfg)
     const double cpr = m_countsPerRev;
     if (m_encInc)  m_encInc ->setValue(static_cast<int>(cfg.enc_increments));
     if (m_encRevs) m_encRevs->setValue(static_cast<int>(cfg.enc_motor_revs));
+    if (m_gearMotor) m_gearMotor->setValue(static_cast<int>(cfg.gear_ratio_motor_revs));
+    if (m_gearShaft) m_gearShaft->setValue(static_cast<int>(cfg.gear_ratio_shaft_revs));
 
     m_homeOffset     ->setValue(incToRad (int32_t(cfg.home_offset), cpr));
     m_homingFast     ->setValue(incToRad (cfg.homing_speed_fast, cpr));
@@ -581,6 +809,8 @@ DriveConfig DriveConfigDialog::config() const
     /* Use the live (possibly edited) encoder resolution for SI<->inc. */
     if (m_encInc)  c.enc_increments = static_cast<uint32_t>(m_encInc->value());
     if (m_encRevs) c.enc_motor_revs = static_cast<uint32_t>(m_encRevs->value());
+    if (m_gearMotor) c.gear_ratio_motor_revs = static_cast<uint32_t>(m_gearMotor->value());
+    if (m_gearShaft) c.gear_ratio_shaft_revs = static_cast<uint32_t>(m_gearShaft->value());
     const double cpr = (c.enc_increments != 0u && c.enc_motor_revs != 0u)
                      ? (double(c.enc_increments) / double(c.enc_motor_revs))
                      : m_countsPerRev;
@@ -626,10 +856,30 @@ void DriveConfigDialog::onReadClicked()
     emit readRequested(m_slaveIdx);
 }
 
-void DriveConfigDialog::onApplyClicked()
+void DriveConfigDialog::onSaveClicked()
 {
     if (m_slaveIdx < 0){ return; }
+
+    /* 1) Live commit: write every OD field via writeDriveConfig. The
+     *    worker uses Qt::QueuedConnection + an internal mutex, so the
+     *    follow-up storage SDO below queues behind this batch and won't
+     *    overlap. */
     emit applyRequested(m_slaveIdx, config());
+
+    /* 2) Flash commit: fire 0x1010:01 = "save" so the just-written
+     *    values land in flash and survive reboot. Same magic value the
+     *    Storage tab's "Save All" button uses. */
+    QByteArray payload(4, '\0');
+    constexpr uint32_t kMagicSave = 0x65766173u;   /* "save" LE on wire */
+    payload[0] = char( kMagicSave        & 0xFFu);
+    payload[1] = char((kMagicSave >> 8 ) & 0xFFu);
+    payload[2] = char((kMagicSave >> 16) & 0xFFu);
+    payload[3] = char((kMagicSave >> 24) & 0xFFu);
+    emit storageCommandRequested(m_slaveIdx, 0x1010, 0x01, payload);
+
+    if (m_storageStatus){
+        m_storageStatus->setText(tr("Save: writing OD + 0x1010:01 …"));
+    }
 }
 
 void DriveConfigDialog::onReadResult(int idx, const DriveConfig& cfg,

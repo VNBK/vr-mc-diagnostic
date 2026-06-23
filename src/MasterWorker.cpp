@@ -70,6 +70,7 @@ void MasterWorker::connectCan(const CanConfig& cfg)
         emit error(QStringLiteral("already connected"));
         return;
     }
+    emit info(QStringLiteral("Number slave is scan: %1 slaves").arg(cfg.count));
     m_mgr = master_mgr_create();
     if (!m_mgr){
         emit error(QStringLiteral("master_mgr_create failed"));
@@ -823,6 +824,8 @@ static QVector<DriveField> driveFields(DriveConfig& c)
         fld(0x6075, 0, c.rated_current),     /* mA                         */
         fld(0x608F, 1, c.enc_increments),    /* encoder increments         */
         fld(0x608F, 2, c.enc_motor_revs),    /* motor revolutions          */
+        fld(0x6091, 1, c.gear_ratio_motor_revs), /* gear motor revs        */
+        fld(0x6091, 2, c.gear_ratio_shaft_revs), /* gear shaft revs        */
 
         /* Protection (vendor 0x2050). Current actual (0x6078) moved to the
          * telemetry graph (streamed in the TPDO). */

@@ -121,8 +121,8 @@ static void pack_le32(uint8_t* p, uint32_t v) {
 static void rpdoRx(uint32_t /*cob_id*/, const uint8_t* data,
                    uint8_t len, void* arg)
 {
-    auto* p = static_cast<PdoSlot*>(arg);
-    if (!p || !data || len < kTPdoBytes){ return; }
+    auto* p =  static_cast<PdoSlot*>(arg);
+    if (!p || !data || len < kTPdoBytes ){ return; }
     std::lock_guard<std::mutex> lk(p->mu);
     p->statusword = le16(data + 0);
     p->position   = static_cast<int32_t>(le32(data + 2));
@@ -432,7 +432,7 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
      * special probe code, just the normal cycle running.
      */
     {
-        constexpr int kProbeTimeoutMs = 250;
+        constexpr int kProbeTimeoutMs = 1000;
         constexpr int kSliceMs        = 5;
         const int     slices          = kProbeTimeoutMs / kSliceMs;
         for (int s = 0; s < slices; ++s){
@@ -448,18 +448,25 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
             if (all_seen){ break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(kSliceMs));
         }
+        int count = 0;
         for (Slot* slot : m_slots){
-            if (!slot->pdo.fresh.load(std::memory_order_acquire)){
-                if (err){
-                    *err = QStringLiteral(
-                        "no slave responded at node %1 within %2 ms "
-                        "(no TPDO after %3 RPDO cycles). Check that the "
-                        "drive is powered + on the correct bitrate.")
-                        .arg(slot->node_id).arg(kProbeTimeoutMs).arg(slices);
-                }
-                close();
-                return false;
+            if (slot->pdo.fresh.load(std::memory_order_acquire)){
+                count++;
+                continue;
             }
+        }
+
+        if (!count){
+            if (err){
+                *err = QStringLiteral(
+                           "no slave responded at node  within %2 ms "
+                           "(no TPDO after %3 RPDO cycles). Check that the "
+                           "drive is powered + on the correct bitrate.")
+                           .arg(kProbeTimeoutMs)
+                           .arg(slices);
+            }
+            close();
+            return false;
         }
     }
     return true;

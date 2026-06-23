@@ -15,6 +15,7 @@
 
 class QComboBox;
 class QDoubleSpinBox;
+class QPushButton;
 class QSpinBox;
 
 namespace vrmc {
@@ -27,6 +28,19 @@ public:
 
     void setParams(const MotorParams& mp);
     MotorParams params() const;
+
+    /** Wire which slave the editor is editing. Enables the Read button
+     *  and gets emitted back on readRequested. <0 = no slave selected
+     *  (Read disabled; Save still writes per the caller's policy). */
+    void setSlaveContext(int slaveIdx);
+
+signals:
+    /** User clicked "Read from drive". MainWindow forwards to the worker
+     *  and pushes the result back via @ref setParams. */
+    void readRequested(int slaveIdx);
+
+private slots:
+    void onReadClicked();
 
 private:
     /* Rated torque is DERIVED (= Kt * rated current, Kt = 1.5*pole*flux) and
@@ -57,6 +71,10 @@ private:
     /* Loaded params cached so non-widget fields (encoder resolution, now
      * a Manufacturer/drive object) survive a round-trip through the form. */
     MotorParams      m_cached;
+
+    /* Slave context for Read button. */
+    int              m_slaveIdx = -1;
+    QPushButton*     m_readBtn  = nullptr;
 };
 
 }  // namespace vrmc

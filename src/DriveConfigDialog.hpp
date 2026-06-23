@@ -64,7 +64,10 @@ protected:
 
 private slots:
     void onReadClicked ();
-    void onApplyClicked();
+    /** Save = write all OD fields via writeDriveConfig (live commit) AND
+     *  then fire 0x1010:01 = "save" to persist to flash. Single click,
+     *  fully persisted. */
+    void onSaveClicked ();
     void onStartHomingClicked();
     void onZeroEncoderClicked();
     void onZeroTorqueClicked ();
@@ -77,6 +80,12 @@ signals:
      *  encoded payload, sized to the type combo's width. */
     void customSdoWriteRequested(int idx, uint16_t odIdx, uint8_t sub, QByteArray bytes);
 
+    /** Operator pressed a Save / Restore button on the Storage tab. The
+     *  bytes payload is the magic value LE-encoded (4 bytes); odIdx is
+     *  0x1010 (save) or 0x1011 (restore) and sub is 0x01 (all), 0x04
+     *  (app), or 0x05 (motor). MainWindow forwards to MasterWorker. */
+    void storageCommandRequested(int idx, uint16_t odIdx, uint8_t sub, QByteArray bytes);
+
 public slots:
     /** MainWindow forwards MasterWorker::customSdoDone here so the
      *  result label paints success / failure. */
@@ -85,11 +94,17 @@ public slots:
                          const QString& message);
 
 private:
-    void buildHomingTab       (QWidget* host);
-    void buildMotionTab       (QWidget* host);
-    void buildProtectTab      (QWidget* host);
-    void buildManufacturerTab (QWidget* host);
+    /* Tabs are organised by STORAGE LOCATION (not function), so the user
+     * can see at a glance which fields survive a power-cycle:
+     *   App    = persisted in app_params blob   (data-flash)
+     *   Motor  = persisted in motor_drive_params blob (code-flash)
+     *   Runtime= not persisted — reset on power-cycle / NMT reset
+     * Within each tab, fields are sub-grouped by function. */
+    void buildAppTab          (QWidget* host);
+    void buildMotorTab        (QWidget* host);
+    void buildRuntimeTab      (QWidget* host);
     void buildCustomTab       (QWidget* host);
+    void buildStorageTab      (QWidget* host);
     /** Walk every tab page and set its minimum size to the largest
      *  sizeHint across all tabs. Forces QTabWidget::sizeHint to
      *  reflect the widest tab's footprint, so adjustSize() can pick a
@@ -126,6 +141,8 @@ private:
     QDoubleSpinBox* m_ratedCurrent   = nullptr;   /**< 0x6075  A             */
     QSpinBox*       m_encInc         = nullptr;   /**< 0x608F:1 increments   */
     QSpinBox*       m_encRevs        = nullptr;   /**< 0x608F:2 motor revs   */
+    QSpinBox*       m_gearMotor      = nullptr;   /**< 0x6091:1 motor revs   */
+    QSpinBox*       m_gearShaft      = nullptr;   /**< 0x6091:2 shaft revs   */
     QSpinBox*       m_stallCurrent   = nullptr;   /**< 0x2050:1 mA           */
     QSpinBox*       m_stallTime      = nullptr;   /**< 0x2050:2 ms           */
 
@@ -134,7 +151,7 @@ private:
     double          m_countsPerRev   = 16384.0;
 
     QPushButton*      m_readBtn  = nullptr;
-    QPushButton*      m_applyBtn = nullptr;
+    QPushButton*      m_saveBtn  = nullptr;   /**< writes OD + 0x1010:01 */
     QDialogButtonBox* m_buttons  = nullptr;
 
     /* Homing-tab action widgets. */
@@ -166,6 +183,16 @@ private:
     QDoubleSpinBox* m_mfCurGainB     = nullptr;   /**< 0x2041:02 (RW)      */
     QDoubleSpinBox* m_mfCurGainC     = nullptr;   /**< 0x2041:03 (RW)      */
     QDoubleSpinBox* m_mfHallOffset   = nullptr;   /**< 0x2060 rad          */
+
+    /* Storage tab widgets. Six buttons + a status line; pair of OD index +
+     * subindex baked into the button via QPushButton::property. */
+    QPushButton*    m_saveAllBtn       = nullptr;   /**< 0x1010:01           */
+    QPushButton*    m_saveAppBtn       = nullptr;   /**< 0x1010:04           */
+    QPushButton*    m_saveMotorBtn     = nullptr;   /**< 0x1010:05           */
+    QPushButton*    m_restoreAllBtn    = nullptr;   /**< 0x1011:01           */
+    QPushButton*    m_restoreAppBtn    = nullptr;   /**< 0x1011:04           */
+    QPushButton*    m_restoreMotorBtn  = nullptr;   /**< 0x1011:05           */
+    QLabel*         m_storageStatus    = nullptr;   /**< last command outcome */
 };
 
 }  // namespace vrmc

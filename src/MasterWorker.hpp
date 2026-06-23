@@ -112,6 +112,11 @@ struct DriveConfig
     uint32_t enc_increments     = 16384; /**< 0x608F:1                     */
     uint32_t enc_motor_revs     = 1;     /**< 0x608F:2                     */
 
+    /* Gear ratio (0x6091 record). gear_ratio = motor_revs / shaft_revs;
+     * persisted in the app_params blob via the 0x6091 OD hook. */
+    uint32_t gear_ratio_motor_revs = 1;  /**< 0x6091:1                     */
+    uint32_t gear_ratio_shaft_revs = 1;  /**< 0x6091:2                     */
+
     /* Protection (vendor 0x2050 record). Stall current crossing held for
      * stall_time trips a fault. */
     uint32_t stall_current      = 0;     /**< 0x2050:1 mA  */

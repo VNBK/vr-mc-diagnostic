@@ -23,7 +23,7 @@ static const char* loopLabel(Loop l)
 }
 
 /** Per-loop default target bandwidth (Hz) for the auto-tune button.
- *  Pulled from `VELOCITY_LOOP_TUNING.md` + the current-loop tuning doc:
+ *  Pulled from `vr-mc-drv/src/app/TUNING.md` (cascade tuning doc):
  *  current ≈ 10× velocity bandwidth so the cascade has headroom;
  *  velocity at 100 Hz is the documented BW=100 row from the gain table;
  *  position runs ≈ 5× slower than velocity. The spinbox lets the

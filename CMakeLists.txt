@@ -119,7 +119,7 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
 
 
 set_target_properties(vr_mc_diagnostic PROPERTIES
-    BUILD_RPATH   "${CMAKE_CURRENT_SOURCE_DIR}/src/backends/zlg/lib"
+    BUILD_RPATH   "${VR_MC_SDK_DIR}/src/platform/linux/zlg/lib"
     INSTALL_RPATH "$ORIGIN/zlg/lib")
 
 install(TARGETS vr_mc_diagnostic RUNTIME DESTINATION bin)

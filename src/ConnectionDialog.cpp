@@ -141,7 +141,7 @@ CanConfig ConnectionDialog::config() const
     c.uartBaud       = static_cast<uint32_t>(m_uartBaud->value());
     c.dxlProtocolVer = static_cast<uint8_t>(m_dxlProto->value());
     c.first_id       = static_cast<uint8_t>(m_firstId->value());
-    c.count           = static_cast<uint8_t>(m_count->value());
+    c.count          = static_cast<uint8_t>(m_count->value());
     c.sdo_timeout_ms = static_cast<uint32_t>(m_timeout->value());
     return c;
 }
