@@ -76,13 +76,9 @@ FirmwareUpgradeDialog::FirmwareUpgradeDialog(QWidget* parent) : QDialog(parent)
     root->addWidget(m_log, 1);
     root->addLayout(btnRow);
 
-    /* --- timer for the simulated upload (V1: no real protocol). --- */
-    m_tick = new QTimer(this);
-    m_tick->setInterval(100);   /* 100 ms steps */
-    connect(m_tick, &QTimer::timeout, this, &FirmwareUpgradeDialog::onTick);
-
-    appendLog(tr("Firmware upgrade pane ready. (V1: simulated upload — "
-                 "no protocol wired yet)"));
+    appendLog(tr("Firmware upgrade ready. Pick an image and click Start; the "
+                 "tool resets the board into its bootloader and streams over "
+                 "CAN-FD."));
 }
 
 void FirmwareUpgradeDialog::setSlaves(const QVector<SlaveSnapshot>& snaps)
@@ -127,18 +123,31 @@ void FirmwareUpgradeDialog::onStart()
             tr("Connect to a drive first so we have a target slave."));
         return;
     }
-    m_running  = true;
-    m_progress = 0;
+    const QVariant data = m_target->currentData();
+    if (!data.isValid()){
+        QMessageBox::information(this, windowTitle(),
+            tr("Select a valid target slave."));
+        return;
+    }
+    const int ret = QMessageBox::warning(this, windowTitle(),
+        tr("This resets slave %1 into its bootloader and overwrites its "
+           "application flash. Do not power off during the upgrade.\n\nProceed?")
+            .arg(m_target->currentText()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (ret != QMessageBox::Yes){ return; }
+
+    m_activeIdx = data.toInt();
+    m_running   = true;
     m_bar->setValue(0);
     m_start->setEnabled(false);
     m_cancel->setEnabled(true);
     m_browse->setEnabled(false);
     m_target->setEnabled(false);
-    m_status->setText(tr("uploading to %1 …").arg(m_target->currentText()));
-    appendLog(tr("=== upload started: %1 → %2")
+    m_status->setText(tr("starting upgrade to %1 …").arg(m_target->currentText()));
+    appendLog(tr("=== upgrade started: %1 → %2")
                   .arg(QFileInfo(m_path->text()).fileName())
                   .arg(m_target->currentText()));
-    m_tick->start();
+    emit startRequested(m_activeIdx, m_path->text());
 }
 
 void FirmwareUpgradeDialog::onCancel()
@@ -147,43 +156,40 @@ void FirmwareUpgradeDialog::onCancel()
         reject();
         return;
     }
-    m_tick->stop();
-    appendLog(tr("=== cancelled at %1%%").arg(m_progress));
-    m_status->setText(tr("cancelled"));
-    resetIdle();
+    appendLog(tr("=== cancel requested"));
+    m_status->setText(tr("cancelling…"));
+    m_cancel->setEnabled(false);
+    emit cancelRequested();
 }
 
-void FirmwareUpgradeDialog::onTick()
+void FirmwareUpgradeDialog::onProgress(int idx, int pct, QString stage)
 {
-    /* Simulated upload: 0 → 100 over ~5 s, with a few canned step messages. */
-    m_progress += 2;
-    if (m_progress == 10){
-        appendLog(tr("erase block 0..."));
-    } else if (m_progress == 30){
-        appendLog(tr("transfer (%1 / %2 KB)").arg(m_progress).arg(100));
-    } else if (m_progress == 60){
-        appendLog(tr("verify checksum..."));
-    } else if (m_progress == 90){
-        appendLog(tr("commit + reboot..."));
-    }
-    if (m_progress >= 100){
-        m_progress = 100;
+    if (!m_running || idx != m_activeIdx){ return; }
+    m_bar->setValue(pct);
+    m_status->setText(tr("%1% — %2").arg(pct).arg(stage));
+    appendLog(tr("[%1%] %2").arg(pct, 3).arg(stage));
+}
+
+void FirmwareUpgradeDialog::onFinished(int idx, bool ok, QString message)
+{
+    if (idx != m_activeIdx){ return; }
+    if (ok){
         m_bar->setValue(100);
-        m_tick->stop();
-        appendLog(tr("=== upload complete (simulated)"));
-        m_status->setText(tr("done"));
-        QMessageBox::information(this, windowTitle(),
-            tr("Upload simulation complete.\n\nPlug in real CiA 1F50 / "
-               "vendor FW-update support to make this hit the wire."));
-        resetIdle();
-        return;
+        m_status->setText(tr("done — %1").arg(message));
+        appendLog(tr("=== %1").arg(message));
+    } else {
+        m_status->setText(tr("failed — %1").arg(message));
+        appendLog(tr("=== FAILED: %1").arg(message));
     }
-    m_bar->setValue(m_progress);
+    resetIdle();
+    if (ok){ QMessageBox::information(this, windowTitle(), message); }
+    else   { QMessageBox::warning   (this, windowTitle(), message); }
 }
 
 void FirmwareUpgradeDialog::resetIdle()
 {
-    m_running = false;
+    m_running   = false;
+    m_activeIdx = -1;
     m_start->setEnabled(true);
     m_cancel->setEnabled(false);
     m_browse->setEnabled(true);

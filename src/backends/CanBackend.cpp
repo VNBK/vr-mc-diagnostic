@@ -432,7 +432,10 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
      * special probe code, just the normal cycle running.
      */
     {
-        constexpr int kProbeTimeoutMs = 1000;
+        /* A node we expect to be offline (bootloader / SDO-only) never
+         * sends a heartbeat, so don't burn the full second waiting — a
+         * short look is enough to catch one if it IS live, then proceed. */
+        const int     kProbeTimeoutMs = cfg.allow_offline ? 150 : 1000;
         constexpr int kSliceMs        = 5;
         const int     slices          = kProbeTimeoutMs / kSliceMs;
         for (int s = 0; s < slices; ++s){
@@ -457,6 +460,19 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
         }
 
         if (!count){
+            if (cfg.allow_offline){
+                /* Bootloader / offline target: the slaves are already
+                 * registered with master_mgr from the bring-up loop above;
+                 * we just didn't see a heartbeat. Proceed so the firmware-
+                 * upgrade path (which only needs the node id + CAN handle)
+                 * can run. */
+                if (err){
+                    *err = QStringLiteral("connected with no TPDO heartbeat "
+                                          "(allow_offline) — bootloader / "
+                                          "offline node");
+                }
+                return true;
+            }
             if (err){
                 *err = QStringLiteral(
                            "no slave responded at node  within %2 ms "
@@ -534,6 +550,21 @@ void CanBackend::pump()
     if (m_client){ co_fd_usdo_client_process(m_client, 1); }
     /* Feetech / Dynamixel: no async RX to pump — every servo op is a
      * synchronous request/reply done inside motor_drive_*_intf. */
+}
+
+void CanBackend::pumpForBoot()
+{
+    /* Drain only the boot endpoint (m_canPdo, where boot_output_cofd_create
+     * put its USDO client). Deliberately does NOT poll m_canCli or run
+     * can_fd_pdo_process / co_fd_usdo_client_process(m_client): during an
+     * upgrade the normal stack must stay dormant so it never answers / aborts
+     * the boot transfer's frames on the shared bus. The boot client itself is
+     * serviced by boot_master_process() in the caller. */
+    if (m_kind == CanKind::Udp){
+        if (m_canPdo){ hal_can_udp_poll(m_canPdo); }
+    } else if (m_kind == CanKind::Zlg){
+        if (m_canPdo){ hal_can_zlg_poll(m_canPdo); }
+    }
 }
 
 int CanBackend::writePdoMapping(int slotIdx, bool isTpdo,

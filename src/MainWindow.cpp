@@ -535,12 +535,15 @@ void MainWindow::buildMenus()
     m_demoStartAct = new QAction(tr("Start &demo…"), this);
     m_demoStopAct  = new QAction(tr("Stop demo"),    this);
     m_demoStopAct->setEnabled(false);
+    m_fwDemoAct    = new QAction(tr("Firmware-upgrade demo…"), this);
     connect(m_demoStartAct, &QAction::triggered, this, &MainWindow::onStartDemo);
     connect(m_demoStopAct,  &QAction::triggered, this, &MainWindow::onStopDemo);
+    connect(m_fwDemoAct,    &QAction::triggered, this, &MainWindow::onStartFwDemo);
 
     helpMenu->addAction(m_docsAct);
     helpMenu->addSeparator();
     helpMenu->addAction(m_demoStartAct);
+    helpMenu->addAction(m_fwDemoAct);
     helpMenu->addAction(m_demoStopAct);
     helpMenu->addSeparator();
     helpMenu->addAction(m_aboutAct);
@@ -858,6 +861,7 @@ void MainWindow::onSnapshots(QVector<vrmc::SlaveSnapshot> snaps)
     if (m_picker)   { m_picker   ->onSnapshots(snaps); }
     m_tuning->step()->onSnapshots(snaps);
     m_tuning->bode()->onSnapshots(snaps);
+    m_tuning->autoTune()->onSnapshots(snaps);
     m_pdoMap->onSnapshots(snaps);
     if (m_driveCfgDlg && m_driveCfgDlg->isVisible()){
         m_driveCfgDlg->onSnapshots(snaps);
@@ -1200,7 +1204,24 @@ void MainWindow::onUploadFirmware()
 {
     FirmwareUpgradeDialog dlg(this);
     dlg.setSlaves(m_latestSnaps);
+
+    /* Drive the real CANopen-FD upgrade through the worker. Connections
+     * are scoped to this modal dialog — destroyed with it on close. */
+    connect(&dlg, &FirmwareUpgradeDialog::startRequested,
+            m_worker, &MasterWorker::startFirmwareUpgrade);
+    connect(&dlg, &FirmwareUpgradeDialog::cancelRequested,
+            m_worker, &MasterWorker::cancelFirmwareUpgrade);
+    connect(m_worker, &MasterWorker::upgradeProgress,
+            &dlg, &FirmwareUpgradeDialog::onProgress);
+    connect(m_worker, &MasterWorker::upgradeFinished,
+            &dlg, &FirmwareUpgradeDialog::onFinished);
+
     dlg.exec();
+    /* If the operator closes mid-flight, make sure the worker stops. Queue
+     * it onto the worker thread — the boot timer/objects are thread-affine. */
+    QMetaObject::invokeMethod(m_worker, [w = m_worker]{
+        w->cancelFirmwareUpgrade();
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::showDocPanel(const QString& name)
@@ -1629,6 +1650,100 @@ void MainWindow::onStopDemo()
     m_demoProcs.clear();
     m_demoStartAct->setEnabled(true);
     m_demoStopAct ->setEnabled(false);
+}
+
+QString MainWindow::findBootSimBinary() const
+{
+    /* Same search strategy as findSimBinary(), for the bootloader-slave
+     * counterpart built alongside the diagnostic (tools/vrmc_boot_sim.c). */
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        appDir + "/vrmc_boot_sim",
+        appDir + "/tools/vrmc_boot_sim",
+    };
+    for (const QString& c : candidates){
+        const QFileInfo fi(QDir::cleanPath(c));
+        if (fi.exists() && fi.isExecutable()){ return fi.canonicalFilePath(); }
+    }
+    const QString fromPath = QStandardPaths::findExecutable(
+        QStringLiteral("vrmc_boot_sim"));
+    return fromPath;
+}
+
+void MainWindow::onStartFwDemo()
+{
+    if (!m_demoProcs.isEmpty()){
+        QMessageBox::information(this, tr("Demo"),
+            tr("A demo is already running. Stop it first via Help → "
+               "Stop demo."));
+        return;
+    }
+    const QString binary = findBootSimBinary();
+    if (binary.isEmpty()){
+        QMessageBox::warning(this, tr("Firmware-upgrade demo"),
+            tr("vrmc_boot_sim not found.\n\n"
+               "It is built as part of the diagnostic — rebuild with "
+               "`cmake --build vr-mc-diagnostic/build` and try again."));
+        return;
+    }
+
+    /* Work dir for the simulated 'flash' (app.bin etc. land here). */
+    const QString workDir = QDir(QDir::tempPath()).filePath(
+        QStringLiteral("vrmc_boot_demo"));
+    QDir().mkpath(workDir);
+
+    auto* p = new QProcess(this);
+    p->setProgram(binary);
+    p->setArguments({QStringLiteral("--work"), workDir});
+    p->setProcessChannelMode(QProcess::ForwardedChannels);
+    p->start();
+    if (!p->waitForStarted(1500)){
+        const QString err = p->errorString();
+        p->deleteLater();
+        QMessageBox::warning(this, tr("Firmware-upgrade demo"),
+            tr("Failed to start vrmc_boot_sim: %1").arg(err));
+        return;
+    }
+    m_demoProcs.push_back(p);
+    m_demoStartAct->setEnabled(false);
+    m_demoStopAct ->setEnabled(true);
+    m_log->appendInfo(tr("fw-demo: vrmc_boot_sim (node %1) pid %2, flash → %3")
+                          .arg(0x0A).arg(p->processId()).arg(workDir));
+
+    /* Connect to the boot node (id 10 = BOOT_COFD_NODE_ID_DEFAULT). It is
+     * an SDO server only, so allow_offline lets the connect register it
+     * without waiting for a PDO heartbeat.
+     *
+     * Open the upgrade dialog only AFTER the worker reports 'connected'
+     * (the slave is registered) plus a short settle for the first snapshot
+     * to populate the slave list — otherwise the target dropdown opens
+     * empty / without the node id. One-shot connection + a safety fallback
+     * in case 'connected' never arrives. */
+    QTimer::singleShot(400, this, [this]{
+        auto opened = std::make_shared<bool>(false);
+        auto conn   = std::make_shared<QMetaObject::Connection>();
+        auto openDlg = [this, opened]{
+            if (*opened){ return; }
+            *opened = true;
+            m_log->appendInfo(tr("fw-demo: pick a firmware image and Start — "
+                                 "it streams over UDP to the boot sim."));
+            onUploadFirmware();
+        };
+        *conn = connect(m_worker, &MasterWorker::connected, this,
+                        [this, conn, openDlg](int){
+            QObject::disconnect(*conn);
+            /* let one UI refresh emit a snapshot carrying the node id */
+            QTimer::singleShot(250, this, openDlg);
+        });
+        QTimer::singleShot(3000, this, openDlg);   /* fallback */
+
+        CanConfig cfg;
+        cfg.kind          = CanKind::Udp;
+        cfg.count         = 1;
+        cfg.first_id      = 0x0A;
+        cfg.allow_offline = true;
+        connectWithConfig(cfg);
+    });
 }
 
 void MainWindow::onAbout()

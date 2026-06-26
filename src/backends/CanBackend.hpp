@@ -78,6 +78,11 @@ struct CanConfig
     uint8_t  first_id       = 5;        /**< First slave id.              */
     uint8_t  count          = 1;        /**< Number of slaves to bring up.*/
     uint32_t sdo_timeout_ms = 100;
+    /* Register the slaves even if none emits a TPDO heartbeat during the
+     * probe (open() warns instead of failing). Used by the firmware-
+     * upgrade demo to attach to a bootloader node, which is an SDO server
+     * only and never sends PDO. */
+    bool     allow_offline  = false;
 };
 
 class CanBackend
@@ -100,6 +105,15 @@ public:
     /** Pump the transport once (drain RX + service USDO client + PDO timers). */
     void pump();
 
+    /** Drain ONLY the boot endpoint's transport, without running the
+     *  normal USDO-client / PDO state machines. Used during a firmware
+     *  upgrade: the boot USDO client (created on @ref canHandle) is driven
+     *  by boot_master_process, and the normal client must stay completely
+     *  idle so it can't inject an SDO abort onto the shared bus mid-
+     *  transfer. Mirrors the dedicated-endpoint model the standalone
+     *  bootmaster_node uses. */
+    void pumpForBoot();
+
     /** Latest TPDO snapshot from a slave, raw drive units. */
     struct PdoFrame {
         uint16_t statusword = 0;
@@ -120,6 +134,14 @@ public:
      *  telemetry should come from cached TPDO frames (fast, passive)
      *  or from per-tick SDO reads (slow, blast-y). */
     bool hasPdo() const { return m_pdo != nullptr; }
+
+    /** Raw hal_can endpoint (the polled channel) for an out-of-band
+     *  CANopen-FD client such as the bootloader's USDO transport
+     *  (boot_output_cofd_create). Valid only on UDP / ZLG transports;
+     *  null for Feetech / Dynamixel. The caller must serialise its use
+     *  with the normal PDO/SDO traffic — the worker pauses the PDO cycle
+     *  for the duration of a firmware upgrade. */
+    void* canHandle() const { return reinterpret_cast<void*>(m_canPdo); }
 
     /** @brief Send one outgoing RPDO frame to a slave.
      *

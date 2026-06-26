@@ -27,6 +27,137 @@
 namespace vrmc {
 
 /* ====================================================================
+ *  Shared step-response metrics
+ *
+ *  One routine feeds both the Step tab (signal-generator capture) and the
+ *  Auto-Tune tab (board STEP_RP_EN capture). It measures the steady levels
+ *  from the data itself rather than assuming the commanded offset, so the
+ *  numbers stay meaningful for position/velocity steps that don't start at
+ *  the commanded baseline.
+ * ==================================================================== */
+
+namespace {
+
+/* CiA-402 statusword: Operation-Enabled bit (matches MasterWorker's check). */
+constexpr uint16_t kSwOperationEnabled = 0x0004;
+
+struct StepMetrics {
+    bool   valid        = false;
+    double initial      = 0.0;   /**< measured pre-step steady level   */
+    double ssValue      = 0.0;   /**< measured post-step steady level  */
+    double commanded    = 0.0;   /**< requested final                  */
+    double ssError      = 0.0;   /**< commanded - ssValue              */
+    double peak         = 0.0;
+    double overshootPct = 0.0;
+    double riseTime     = -1.0;  /**< 10->90 % of measured range, s    */
+    double settlingTime = -1.0;  /**< last exit from 2 % band, s       */
+    double bandwidthHz  = -1.0;  /**< 0.35 / riseTime                  */
+};
+
+/* t and y are parallel; t is seconds, monotonically increasing, with the
+ * step assumed at t≈t[0]. commanded is the requested final value. */
+StepMetrics computeStepMetrics(const QVector<double>& t,
+                               const QVector<double>& y,
+                               double commanded)
+{
+    StepMetrics m;
+    const int N = y.size();
+    if (N < 4 || t.size() != N){ return m; }
+
+    /* Steady levels: average a small head/tail window so a single noisy
+     * sample doesn't define the baseline or the final value. */
+    const int head = std::max(1, N / 20);
+    const int tail = std::max(1, N / 10);
+    double s0 = 0.0, s1 = 0.0;
+    for (int i = 0; i < head; ++i){ s0 += y[i]; }
+    for (int i = N - tail; i < N; ++i){ s1 += y[i]; }
+    m.initial   = s0 / head;
+    m.ssValue   = s1 / tail;
+    m.commanded = commanded;
+    m.ssError   = commanded - m.ssValue;
+
+    const double range = m.ssValue - m.initial;
+    const bool rising  = range > 0.0;
+
+    /* Peak in the step direction. */
+    m.peak = m.initial;
+    for (int i = 0; i < N; ++i){
+        m.peak = rising ? std::max(m.peak, y[i]) : std::min(m.peak, y[i]);
+    }
+
+    m.valid = true;
+    if (std::abs(range) < 1e-9){
+        /* Flat response: steady-state error is still meaningful, the rest
+         * is not. Leave rise/overshoot/settle/bw at their "N/A" defaults. */
+        return m;
+    }
+
+    /* Overshoot past the measured steady value, as % of the step size. */
+    const double ov = (m.peak - m.ssValue) / range * 100.0;
+    m.overshootPct  = std::max(0.0, ov);
+
+    /* Rise time: first 10 % crossing -> first 90 % crossing. */
+    const double lo10 = m.initial + 0.10 * range;
+    const double hi90 = m.initial + 0.90 * range;
+    double t10 = -1.0, t90 = -1.0;
+    for (int i = 0; i < N; ++i){
+        if (t10 < 0 && ((rising && y[i] >= lo10) || (!rising && y[i] <= lo10))){
+            t10 = t[i];
+        }
+        if (t10 >= 0 && t90 < 0 &&
+            ((rising && y[i] >= hi90) || (!rising && y[i] <= hi90))){
+            t90 = t[i]; break;
+        }
+    }
+    if (t10 >= 0 && t90 >= t10){
+        m.riseTime    = t90 - t10;
+        if (m.riseTime > 1e-9){
+            /* First-order/2nd-order rule of thumb: f_-3dB ≈ 0.35 / t_rise. */
+            m.bandwidthHz = 0.35 / m.riseTime;
+        }
+    }
+
+    /* Settling: last time outside the 2 % band around the steady value. */
+    const double band = 0.02 * std::abs(range);
+    const double tEdge = t.front();
+    m.settlingTime = -1.0;
+    for (int i = 0; i < N; ++i){
+        if (std::abs(y[i] - m.ssValue) > band){ m.settlingTime = t[i] - tEdge; }
+    }
+    return m;
+}
+
+QString formatStepMetrics(const StepMetrics& m)
+{
+    if (!m.valid){ return QStringLiteral("no samples"); }
+    auto f = [](double v, int p = 3){ return QString::number(v, 'f', p); };
+
+    const QString rise = (m.riseTime >= 0)
+        ? QStringLiteral("%1 s").arg(f(m.riseTime))
+        : QStringLiteral("—");
+    const QString bw = (m.bandwidthHz >= 0)
+        ? QStringLiteral("%1 Hz").arg(f(m.bandwidthHz, 2))
+        : QStringLiteral("—");
+    const QString settle = (m.settlingTime >= 0)
+        ? QStringLiteral("%1 s (2%%)").arg(f(m.settlingTime))
+        : QStringLiteral("&lt; tick");
+
+    return QStringLiteral(
+        "<b>Overshoot:</b> %1%% &nbsp; "
+        "<b>Settling:</b> %2 &nbsp; "
+        "<b>Rise:</b> %3 &nbsp; "
+        "<b>BW:</b> %4<br>"
+        "<b>Steady:</b> %5 &nbsp; "
+        "<b>Ref:</b> %6 &nbsp; "
+        "<b>SS err:</b> %7 &nbsp; "
+        "<b>Peak:</b> %8")
+        .arg(f(m.overshootPct, 1), settle, rise, bw,
+             f(m.ssValue), f(m.commanded), f(m.ssError), f(m.peak));
+}
+
+}  // namespace
+
+/* ====================================================================
  *  StepResponseView
  * ==================================================================== */
 
@@ -118,6 +249,19 @@ void StepResponseView::resetChart()
 void StepResponseView::onRunClicked()
 {
     if (m_idx < 0){ return; }
+
+    /* Guard: a step into a disabled drive just draws a flat line. Refuse
+     * with a clear message when we have fresh status showing the drive is
+     * not in Operation-Enabled. (When no PDO status is available yet we
+     * can't prove it's disabled, so we let the run proceed.) */
+    if (m_haveStatus && !m_opEnabled){
+        m_metrics->setText(tr(
+            "<b style='color:#c0392b;'>Drive not enabled.</b> "
+            "Enable it in the matching mode (Control panel) before running "
+            "a step — the command can't move a disabled drive."));
+        return;
+    }
+
     m_stepBase    = m_offset->value();
     m_stepMag     = m_amp->value();
     m_duration_s  = m_duration->value();
@@ -139,7 +283,20 @@ void StepResponseView::onRunClicked()
 
 void StepResponseView::onSnapshots(const QVector<SlaveSnapshot>& snaps)
 {
-    if (!m_capturing || m_idx < 0){ return; }
+    if (m_idx < 0){ return; }
+
+    /* Track Operation-Enabled for the active slave regardless of capture
+     * state, so the Run guard reflects the live drive. */
+    for (const auto& s : snaps){
+        if (s.idx != m_idx){ continue; }
+        if (s.pdoFresh){
+            m_haveStatus = true;
+            m_opEnabled  = (s.statusword & kSwOperationEnabled) != 0;
+        }
+        break;
+    }
+
+    if (!m_capturing){ return; }
     for (const auto& s : snaps){
         if (s.idx != m_idx){ continue; }
         const double t = m_t0.elapsed() / 1000.0;
@@ -186,60 +343,17 @@ void StepResponseView::computeAndShowMetrics()
         m_metrics->setText(tr("no samples"));
         return;
     }
-    const double initial = m_stepBase;
-    const double final_  = m_stepBase + m_stepMag;
-    const double range   = final_ - initial;
-    if (std::abs(range) < 1e-9){
-        m_metrics->setText(tr("zero step magnitude — skip metrics"));
-        return;
-    }
+    /* Hand the measured (t, actual) trace plus the commanded final to the
+     * shared analyser. It derives the pre-/post-step steady levels from the
+     * data, so the metrics hold even when the actual didn't start at the
+     * commanded offset (the usual case for position / velocity). */
+    QVector<double> t, y;
+    t.reserve(m_samples.size());
+    y.reserve(m_samples.size());
+    for (const auto& s : m_samples){ t.push_back(s.t); y.push_back(s.actual); }
 
-    /* Rise time: first time actual crosses 10% → first time crosses 90%. */
-    const double lo10 = initial + 0.10 * range;
-    const double hi90 = initial + 0.90 * range;
-    double t10 = -1.0, t90 = -1.0;
-    for (const auto& s : m_samples){
-        const bool rising = (range > 0);
-        if (t10 < 0 && ((rising && s.actual >= lo10) ||
-                        (!rising && s.actual <= lo10))){ t10 = s.t; }
-        if (t90 < 0 && ((rising && s.actual >= hi90) ||
-                        (!rising && s.actual <= hi90))){ t90 = s.t; break; }
-    }
-
-    /* Overshoot: max deviation past final (in direction of step). */
-    double peak = initial;
-    for (const auto& s : m_samples){
-        if (range > 0){ peak = std::max(peak, s.actual); }
-        else          { peak = std::min(peak, s.actual); }
-    }
-    const double overshootPct = ((peak - final_) / range) * 100.0;
-
-    /* Settling: last time |actual - final| > 2% of range. */
-    const double band = 0.02 * std::abs(range);
-    double tSettle = -1.0;
-    for (const auto& s : m_samples){
-        if (std::abs(s.actual - final_) > band){ tSettle = s.t; }
-    }
-
-    auto fmt = [](double v, int prec = 3){
-        return QString::number(v, 'f', prec);
-    };
-    QString riseTxt = (t10 >= 0 && t90 >= 0)
-        ? tr("%1 s (10→90%%)").arg(fmt(t90 - t10))
-        : tr("—");
-    QString settleTxt = (tSettle >= 0)
-        ? tr("%1 s (2%% band)").arg(fmt(tSettle))
-        : tr("< tick (good)");
-
-    m_metrics->setText(tr(
-        "<b>Rise time:</b> %1 &nbsp;&nbsp;"
-        "<b>Overshoot:</b> %2%% &nbsp;&nbsp;"
-        "<b>Settling:</b> %3 &nbsp;&nbsp;"
-        "<b>Peak:</b> %4  <b>Final:</b> %5")
-            .arg(riseTxt)
-            .arg(fmt(overshootPct, 1))
-            .arg(settleTxt)
-            .arg(fmt(peak)).arg(fmt(final_)));
+    const StepMetrics m = computeStepMetrics(t, y, m_stepBase + m_stepMag);
+    m_metrics->setText(formatStepMetrics(m));
 }
 
 
@@ -667,12 +781,17 @@ AutoTuneView::AutoTuneView(QWidget* parent) : QWidget(parent)
     auto* chartView = new QChartView(m_chart);
     chartView->setRenderHint(QPainter::Antialiasing);
 
+    m_metrics = new QLabel(tr("—"), this);
+    m_metrics->setTextFormat(Qt::RichText);
+    m_metrics->setWordWrap(true);
+
     auto* root = new QVBoxLayout(this);
     root->addWidget(m_label);
     root->addLayout(tuneRow);
     root->addLayout(resultRow);
     root->addLayout(captureRow);
     root->addWidget(chartView, /*stretch=*/1);
+    root->addWidget(m_metrics);
 
     connect(m_tuneBtn,    &QPushButton::clicked, this, &AutoTuneView::onTuneClicked);
     connect(m_captureBtn, &QPushButton::clicked, this, &AutoTuneView::onCaptureClicked);
@@ -711,6 +830,23 @@ void AutoTuneView::setActiveSlave(int idx, const QString& name)
         m_kpView->setValue(0.0);
         m_kiView->setValue(0.0);
         resetChart();
+    }
+    /* Drive state is unknown until the next snapshot for this slave. */
+    m_haveStatus = false;
+    m_opEnabled  = false;
+    if (m_metrics){ m_metrics->setText(tr("—")); }
+}
+
+void AutoTuneView::onSnapshots(const QVector<SlaveSnapshot>& snaps)
+{
+    if (m_idx < 0){ return; }
+    for (const auto& s : snaps){
+        if (s.idx != m_idx){ continue; }
+        if (s.pdoFresh){
+            m_haveStatus = true;
+            m_opEnabled  = (s.statusword & kSwOperationEnabled) != 0;
+        }
+        break;
     }
 }
 
@@ -811,6 +947,19 @@ void AutoTuneView::onCaptureClicked()
 {
     if (m_idx < 0){ return; }
     const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
+
+    /* Guard: the board step harness can't excite a disabled drive, so a
+     * capture would come back flat. Refuse with a clear message when the
+     * live status shows the drive isn't enabled. */
+    if (m_haveStatus && !m_opEnabled){
+        m_captureStatus->setText(tr("drive not enabled"));
+        m_captureStatus->setStyleSheet(QStringLiteral("color: #c0392b;"));
+        m_metrics->setText(tr(
+            "<b style='color:#c0392b;'>Drive not enabled.</b> Enable it in "
+            "the matching mode (Control panel) before capturing a step."));
+        return;
+    }
+
     /* All three loops now supported on the board side; Position uses an
      * app-local 100 Hz sampler (the SDK stepRPVars only covers current
      * / speed / torque). Same MasterWorker capture flow regardless. */
@@ -832,9 +981,22 @@ void AutoTuneView::onStepCaptured(int idx, Loop loop,
     if (loop != l){ return; }
     if (ok && buf0.size() == 256 && buf1.size() == 256){
         replotStep(buf0, buf1, sample_rate_hz);
+
+        /* Analyse the measured response (buf0) against the commanded step
+         * (ref_default -> ref_default + amp). dt comes from the board's
+         * reported sample rate. */
+        const double dt = sample_rate_hz > 0.0f ? 1.0 / double(sample_rate_hz) : 0.0005;
+        QVector<double> t, y;
+        t.reserve(buf0.size());
+        y.reserve(buf0.size());
+        for (int i = 0; i < buf0.size(); ++i){ t.push_back(i * dt); y.push_back(buf0[i]); }
+        const double commanded = m_refDefault->value() + m_amp->value();
+        m_metrics->setText(formatStepMetrics(computeStepMetrics(t, y, commanded)));
+
         m_captureStatus->setText(tr("done @ %1 kHz").arg(sample_rate_hz / 1000.0, 0, 'f', 1));
         m_captureStatus->setStyleSheet(QStringLiteral("color: #228822;"));
     } else {
+        m_metrics->setText(tr("—"));
         m_captureStatus->setText(tr("failed"));
         m_captureStatus->setStyleSheet(QStringLiteral("color: #c0392b;"));
     }

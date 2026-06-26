@@ -115,6 +115,7 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
     platform_linux
     motor_drive_feetech_intf
     feetech_servo
+    vr_bootmaster          # boot_master + boot_slave + file-input + cofd-output
 )
 
 
@@ -146,4 +147,32 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         platform_linux
     )
     install(TARGETS vrmc_sim RUNTIME DESTINATION bin)
+
+    # ---- vrmc_boot_sim — host bootloader slave for upgrade testing ------
+    #
+    # Counterpart to vrmc_sim: runs the SDK boot core (vr_bootcore) over a
+    # UDP-multicast "CAN bus" (vr_bootport_linux) so the diagnostic's
+    # Tools -> Firmware upgrade can be exercised end-to-end on one machine,
+    # before touching real F2800154 hardware. The "flashed" image lands as
+    # app.bin under --work (default /tmp/vrboot).
+    if(TARGET vr_bootcore AND TARGET vr_bootport_linux)
+        add_executable(vrmc_boot_sim tools/vrmc_boot_sim.c)
+        target_link_libraries(vrmc_boot_sim PRIVATE
+            vr_bootcore
+            vr_bootport_linux
+            platform_linux
+        )
+        install(TARGETS vrmc_boot_sim RUNTIME DESTINATION bin)
+    endif()
+
+    # boot_selftest — headless repro of the diagnostic's upgrade transport,
+    # used to validate the pumpForBoot() shared-bus fix (not installed).
+    if(TARGET vr_bootmaster)
+        add_executable(boot_selftest tools/boot_selftest.c)
+        target_link_libraries(boot_selftest PRIVATE
+            vr_bootmaster
+            can_stack
+            platform_linux
+        )
+    endif()
 endif()

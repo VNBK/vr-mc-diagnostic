@@ -286,6 +286,20 @@ public slots:
      *  taring the torque feedforward channel at the current loading. */
     void zeroTorqueHere  (int idx);
 
+    /** Flash a new firmware image to a slave over the CANopen-FD boot
+     *  protocol (SDK vr_bootmaster → the device's 0x3003 boot OD).
+     *
+     *  Sequence: (1) best-effort "enter bootloader" vendor SDO so a
+     *  running application resets into its bootloader; (2) pause the PDO
+     *  cycle; (3) stream @p path's segments via boot_master, reporting
+     *  @ref upgradeProgress; (4) restore the PDO cycle and emit
+     *  @ref upgradeFinished. Drives a dedicated worker-thread pump timer
+     *  so the upgrade can be cancelled mid-flight. */
+    void startFirmwareUpgrade(int idx, QString path);
+    /** Abort an in-flight upgrade (operator Cancel). Tears the boot
+     *  session down and restores the PDO cycle. */
+    void cancelFirmwareUpgrade();
+
 signals:
     void connected(int slaveCount);
     void disconnected();
@@ -329,6 +343,12 @@ signals:
     void customSdoDone(int slaveIdx, bool isWrite, uint16_t odIdx, uint8_t sub,
                        bool ok, QString valueDecoded, QString message);
 
+    /** Firmware-upgrade progress. @p pct is 0..100; @p stage is a short
+     *  human label ("erasing", "streaming 42/96", …). */
+    void upgradeProgress (int idx, int pct, QString stage);
+    /** Firmware-upgrade terminal result. */
+    void upgradeFinished (int idx, bool ok, QString message);
+
 public slots:
     /** Run an expedited SDO upload (read). @p byteLen is the number of
      *  bytes to fetch (1/2/4 for typical CiA-301 datatypes). Result is
@@ -342,9 +362,17 @@ private slots:
     void onTick();                  /**< UI refresh + cached PDO snapshot read */
     void onCycleTick();             /**< PDO cycle: send 1 RPDO per slot     */
     void onGenTick();               /**< QTimer callback pushing waveform value */
+    void onBootTick();              /**< pump + boot_master_process during upgrade */
 
 private:
     void teardown();
+    /** Tear down the boot session, restore the normal PDO cycle, and
+     *  (optionally) emit the terminal result. Idempotent. */
+    void bootTeardown(bool emitResult, bool ok, const QString& message);
+    /** C-callback trampoline for boot_master_start_upgrade — @p arg is
+     *  this. Translates BOOT_EVENT_* into progress/finished signals. */
+    static void onBootEventThunk(uint8_t ev, int32_t detail, void* arg);
+    void onBootEvent(uint8_t ev, int32_t detail);
 
     CanBackend                  m_can;
     master_mgr_t*               m_mgr      = nullptr;
@@ -383,6 +411,18 @@ private:
     GenCfg                      m_genCfg;
     int                         m_genIdx   = -1;
     double                      m_genT0    = 0.0;
+
+    /* Firmware-upgrade (boot) session. Opaque SDK handles kept as void*
+     * so the header doesn't pull in the vr_bootmaster C headers. Only
+     * one upgrade at a time. */
+    QTimer*                     m_bootTimer  = nullptr; /* pump @ ~1 kHz   */
+    void*                       m_bootMaster = nullptr; /* boot_master_t*  */
+    void*                       m_bootSlave  = nullptr; /* boot_slave_t*   */
+    void*                       m_bootInput  = nullptr; /* boot_input_t*   */
+    void*                       m_bootOutput = nullptr; /* boot_output_t*  */
+    int                         m_bootIdx    = -1;
+    int                         m_bootTotalSeg = 0;     /* for % progress  */
+    bool                        m_bootDone   = false;   /* finish latched  */
 
     /* Last commanded setpoint per slave (indexed by slave idx). */
     struct CmdCache { float pos = 0.0f; float vel = 0.0f; float trq = 0.0f;

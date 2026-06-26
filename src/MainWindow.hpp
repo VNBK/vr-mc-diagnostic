@@ -109,9 +109,17 @@ private slots:
     void onStartDemo();
     /** Kill every demo process and disconnect. No-op if none running. */
     void onStopDemo();
+    /** Firmware-upgrade demo: spawn the in-tree bootloader sim
+     *  (vrmc_boot_sim), connect to it offline (it answers SDO only, no
+     *  PDO heartbeat), and open the Firmware-upgrade dialog so the whole
+     *  OTA path can be exercised on one machine. Reuses the demo-process
+     *  bookkeeping, so Stop demo tears it down. */
+    void onStartFwDemo();
     /** Locate the cia402_drive_sim binary by walking up from the
      *  diagnostic's own dir; returns an empty string if not found. */
     QString findSimBinary() const;
+    /** Locate the vrmc_boot_sim binary (bootloader-slave counterpart). */
+    QString findBootSimBinary() const;
 
 private:
     void buildUi();
@@ -164,6 +172,7 @@ private:
     QVector<QProcess*> m_demoProcs;
     QAction*          m_demoStartAct = nullptr;
     QAction*          m_demoStopAct  = nullptr;
+    QAction*          m_fwDemoAct    = nullptr;
 
     SlaveTableModel*      m_model       = nullptr;
     QTableView*           m_table       = nullptr;

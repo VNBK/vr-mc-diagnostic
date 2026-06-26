@@ -2,10 +2,10 @@
  * @file   FirmwareUpgradeDialog.hpp
  * @brief  Modal screen that walks a firmware upload to a selected slave.
  *
- * V1 simulates the upload over a few seconds with a QTimer so the UX is
- * fully exercised without the actual CiA 1F50 / vendor-specific transfer
- * protocol. Plumb a real worker slot into @c performUpload() once the
- * SDK exposes the FW-update primitives.
+ * Drives a real CANopen-FD firmware upgrade through MasterWorker
+ * (vr_bootmaster → the device's 0x3003 boot OD). The dialog only owns the
+ * UI: @ref startRequested / @ref cancelRequested go out to the worker, and
+ * @ref onProgress / @ref onFinished come back to render progress.
  */
 
 #pragma once
@@ -19,7 +19,6 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QLabel;
-class QTimer;
 
 namespace vrmc {
 
@@ -32,11 +31,22 @@ public:
     /** Populate the slave dropdown from the live snapshot list. */
     void setSlaves(const QVector<vrmc::SlaveSnapshot>& snaps);
 
+signals:
+    /** Operator hit Start: stream @p path to @p slaveIdx. */
+    void startRequested(int slaveIdx, QString path);
+    /** Operator hit Cancel during an in-flight upgrade. */
+    void cancelRequested();
+
+public slots:
+    /** Wired to @c MasterWorker::upgradeProgress. */
+    void onProgress(int idx, int pct, QString stage);
+    /** Wired to @c MasterWorker::upgradeFinished. */
+    void onFinished(int idx, bool ok, QString message);
+
 private slots:
     void onBrowse();
     void onStart();
     void onCancel();
-    void onTick();
 
 private:
     void appendLog(const QString& line);
@@ -53,9 +63,8 @@ private:
     QPlainTextEdit*  m_log     = nullptr;
 
     /* --- state --- */
-    QTimer*          m_tick    = nullptr;
-    int              m_progress = 0;
-    bool             m_running  = false;
+    bool             m_running    = false;
+    int              m_activeIdx  = -1;
 };
 
 }  // namespace vrmc

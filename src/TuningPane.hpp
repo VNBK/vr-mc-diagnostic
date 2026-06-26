@@ -93,6 +93,11 @@ private:
     double              m_stepBase = 0.0;
     double              m_stepMag  = 1.0;
     double              m_duration_s = 2.0;
+
+    /* Live drive state, tracked from the snapshot stream so Run can refuse
+     * to command a step into a disabled drive (flat-line "not working"). */
+    bool                m_haveStatus = false;  /**< saw a fresh PDO status   */
+    bool                m_opEnabled  = false;  /**< statusword Operation-En. */
 };
 
 
@@ -184,6 +189,10 @@ public:
      *  commit. Triggers an immediate refresh if Kp is already populated. */
     void setMotorParams(const vrmc::MotorParams& p);
 
+    /** Track live drive state so Capture can refuse to fire a step into a
+     *  disabled drive. Wired to @c MasterWorker::snapshots in MainWindow. */
+    void onSnapshots(const QVector<vrmc::SlaveSnapshot>& snaps);
+
 signals:
     /** Request a model-based PI auto-tune on the slave. Result lands on
      *  @ref onGainTuned. */
@@ -237,6 +246,11 @@ private:
     QDoubleSpinBox*     m_refDefault = nullptr;
     QPushButton*        m_captureBtn = nullptr;
     QLabel*             m_captureStatus = nullptr;
+    QLabel*             m_metrics    = nullptr;  /**< overshoot/settle/BW row */
+
+    /* Live drive state from the snapshot stream (see onSnapshots). */
+    bool                m_haveStatus = false;
+    bool                m_opEnabled  = false;
 
     /* Plot. buffer0 = measured signal (Iq or omega depending on loop);
      * buffer1 = reference / control effort. */

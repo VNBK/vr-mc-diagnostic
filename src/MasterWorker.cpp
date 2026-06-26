@@ -11,7 +11,14 @@ extern "C" {
 #include "master_mgr.h"
 #include "motor_drive_interface.h"
 #include "cia402/cia402_utils.h"
+
+/* vr_bootmaster: host-side CANopen-FD firmware-upgrade driver. */
+#include "boot_master.h"
+#include "boot_slave.h"
+#include "interface/boot_if_impl.h"
 }
+
+#include <QFileInfo>
 
 namespace vrmc {
 
@@ -59,6 +66,10 @@ MasterWorker::MasterWorker(QObject* parent) : QObject(parent)
     m_genTimer = new QTimer(this);
     m_genTimer->setTimerType(Qt::PreciseTimer);
     connect(m_genTimer, &QTimer::timeout, this, &MasterWorker::onGenTick);
+
+    m_bootTimer = new QTimer(this);
+    m_bootTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_bootTimer, &QTimer::timeout, this, &MasterWorker::onBootTick);
 }
 
 MasterWorker::~MasterWorker() { teardown(); }
@@ -173,7 +184,7 @@ void MasterWorker::onTick()
     const bool pdo = m_can.hasPdo();
     ++m_refreshTick;
     const int houseKeepEvery = std::max(1, m_hz);  /* 1 Hz */
-    if (!pdo || m_refreshTick >= houseKeepEvery){
+    if (!pdo && m_refreshTick >= houseKeepEvery){
         master_mgr_refresh(m_mgr);
         m_refreshTick = 0;
     }
@@ -1293,6 +1304,213 @@ void MasterWorker::onGenTick()
     const int16_t trq_perm   = cia402_nm_to_milli_rated(c.trq, m_ratedNm);
     m_can.setTarget(static_cast<uint32_t>(m_genIdx),
                     pos_counts, vel_counts, trq_perm);
+}
+
+/* ====================================================================== *
+ *  Firmware upgrade (CANopen-FD boot protocol via vr_bootmaster)
+ * ====================================================================== */
+
+namespace {
+/* Vendor "reset into bootloader" command. The running application is
+ * expected to answer this SDO by committing an upgrade-pending flag and
+ * issuing a device reset so it comes up in its bootloader (SDO server on
+ * the 0x3003 boot OD). It is BEST-EFFORT here: if the application doesn't
+ * implement it yet the write aborts and we proceed anyway, which still
+ * works when the operator has put the board in bootloader mode manually.
+ *
+ * TODO(board): implement this object in app_cia402 so enter-boot is fully
+ * automated (set boot_metadata upgrade flag + SysCtl_resetDevice). */
+constexpr uint16_t kEnterBootIndex = 0x2F00u;   /* vendor: reset-to-boot   */
+constexpr uint8_t  kEnterBootSub   = 0x00u;
+constexpr uint32_t kEnterBootMagic = 0x544F4F42u; /* "BOOT" little-endian  */
+}  // namespace
+
+void MasterWorker::onBootEventThunk(uint8_t ev, int32_t detail, void* arg)
+{
+    if (arg){ static_cast<MasterWorker*>(arg)->onBootEvent(ev, detail); }
+}
+
+void MasterWorker::onBootEvent(uint8_t ev, int32_t detail)
+{
+    const int idx = m_bootIdx;
+    switch (ev){
+    case BOOT_EVENT_UPGRADE_STARTING:
+        emit upgradeProgress(idx, 0, tr("starting"));
+        break;
+    case BOOT_EVENT_UPGRADE_SYSTEM_READY:
+        emit upgradeProgress(idx, 5, tr("bootloader ready — streaming"));
+        break;
+    case BOOT_EVENT_UPGRADE_IN_PROCESSING: {
+        /* detail = committed segment index (0-based). Reserve 5 % for the
+         * handshake and 5 % for the final commit; map segments to 5..95. */
+        const int seg = detail + 1;
+        const int tot = m_bootTotalSeg > 0 ? m_bootTotalSeg : seg;
+        const int pct = 5 + (90 * seg) / (tot > 0 ? tot : 1);
+        emit upgradeProgress(idx, pct < 95 ? pct : 95,
+                             tr("streaming %1/%2").arg(seg).arg(tot));
+        break;
+    }
+    case BOOT_EVENT_UPGRADE_FINISH: {
+        const bool ok = (detail == BOOT_UPGRADING_ERR_NONE);
+        if (ok){ emit upgradeProgress(idx, 100, tr("done")); }
+        emit upgradeFinished(idx, ok,
+            ok ? tr("upgrade complete")
+               : tr("upgrade failed (err=%1)").arg(detail));
+        /* Defer object teardown until boot_master_process() has unwound
+         * (we're inside its call stack here). */
+        m_bootDone = true;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void MasterWorker::startFirmwareUpgrade(int idx, QString path)
+{
+    if (m_bootMaster){
+        emit upgradeFinished(idx, false, tr("an upgrade is already running"));
+        return;
+    }
+    if (!m_mgr){
+        emit upgradeFinished(idx, false, tr("not connected"));
+        return;
+    }
+    void* canh = m_can.canHandle();
+    if (!canh){
+        emit upgradeFinished(idx, false,
+            tr("firmware upgrade needs a CAN-FD transport (UDP/ZLG)"));
+        return;
+    }
+
+    QMutexLocker lock(&m_mutex);
+
+    master_slave_info_t mi{};
+    if (master_mgr_get_info(m_mgr, static_cast<uint32_t>(idx), &mi) != 0){
+        lock.unlock();
+        emit upgradeFinished(idx, false, tr("no such slave %1").arg(idx));
+        return;
+    }
+    const uint8_t nodeId = static_cast<uint8_t>(mi.id);
+
+    const QFileInfo fi(path);
+    if (!fi.isFile() || fi.size() <= 0){
+        lock.unlock();
+        emit upgradeFinished(idx, false, tr("cannot read image: %1").arg(path));
+        return;
+    }
+    /* Segment count for progress: ceil(size / SEGMENT_DATA_SIZE). */
+    m_bootTotalSeg = static_cast<int>((fi.size() + SEGMENT_DATA_SIZE - 1)
+                                      / SEGMENT_DATA_SIZE);
+
+    /* (1) Best-effort enter-boot: ask the running app to reset into its
+     * bootloader. Harmless abort if unimplemented. */
+    {
+        QString err;
+        uint32_t magic = kEnterBootMagic;
+        if (m_can.writeSdo(idx, kEnterBootIndex, kEnterBootSub,
+                           &magic, 4, &err) != 0){
+            emit info(tr("enter-boot SDO not acked (%1) — assuming the board "
+                         "is already in bootloader mode").arg(err));
+        } else {
+            emit info(tr("enter-boot sent to slave %1; waiting for bootloader")
+                          .arg(idx));
+        }
+    }
+
+    /* (2) Pause the normal PDO cycle + UI refresh for the duration. */
+    if (m_cycle){ m_cycle->stop(); }
+    if (m_tick) { m_tick->stop();  }
+
+    /* (3) Assemble the boot master over the live CAN handle. */
+    boot_master_t* master = boot_master_create();
+    boot_input_t*  input  = boot_input_file_create(path.toUtf8().constData());
+    boot_output_t* output = boot_output_cofd_create(canh, nodeId);
+    boot_slave_t*  slave  = (input && output)
+        ? boot_slave_create(nodeId, input, output, master) : nullptr;
+    const bool added = (master && slave &&
+                        boot_master_add_slave(master, slave) >= 0);
+
+    if (!added){
+        /* Clean up whatever was created without double-freeing. */
+        if (slave){ boot_slave_destroy(slave); }      /* frees input+output */
+        else {
+            if (output){ output->proc->free(output); }
+            if (input) { input ->proc->free(input);  }
+        }
+        if (master){ boot_master_destroy(master); }
+        if (m_cycle && m_cycleHz > 0){ m_cycle->start(1000 / m_cycleHz); }
+        if (m_tick  && m_hz > 0)     { m_tick ->start(1000 / m_hz); }
+        lock.unlock();
+        emit upgradeFinished(idx, false, tr("boot session setup failed"));
+        return;
+    }
+
+    m_bootMaster = master;
+    m_bootSlave  = slave;
+    m_bootInput  = input;
+    m_bootOutput = output;
+    m_bootIdx    = idx;
+    m_bootDone   = false;
+
+    if (boot_master_start_upgrade(master, &MasterWorker::onBootEventThunk,
+                                  this) < 0){
+        lock.unlock();
+        bootTeardown(/*emitResult=*/true, /*ok=*/false,
+                     tr("start_upgrade failed"));
+        return;
+    }
+
+    lock.unlock();
+    emit info(tr("firmware upgrade started: %1 → slave %2 (node %3, %4 segments)")
+                  .arg(fi.fileName()).arg(idx).arg(nodeId).arg(m_bootTotalSeg));
+    m_bootTimer->start(1);   /* ~1 kHz pump */
+}
+
+void MasterWorker::onBootTick()
+{
+    if (!m_bootMaster){ m_bootTimer->stop(); return; }
+    /* Boot-only pump: drain the boot endpoint and let boot_master_process
+     * drive the boot USDO client. The normal client/PDO stay idle so they
+     * can't abort the transfer on the shared bus. */
+    m_can.pumpForBoot();
+    boot_master_process(m_bootMaster);
+    if (m_bootDone){
+        /* Terminal event already emitted in onBootEvent; just reclaim. */
+        bootTeardown(/*emitResult=*/false, /*ok=*/false, QString());
+    }
+}
+
+void MasterWorker::cancelFirmwareUpgrade()
+{
+    if (!m_bootMaster){ return; }
+    bootTeardown(/*emitResult=*/true, /*ok=*/false, tr("cancelled"));
+}
+
+void MasterWorker::bootTeardown(bool emitResult, bool ok, const QString& message)
+{
+    if (m_bootTimer){ m_bootTimer->stop(); }
+    const int idx = m_bootIdx;
+
+    if (m_bootMaster){
+        /* boot_master_destroy cascades: frees the slave, which frees the
+         * input + output via their vtable. */
+        boot_master_destroy(static_cast<boot_master_t*>(m_bootMaster));
+    }
+    m_bootMaster = m_bootSlave = m_bootInput = m_bootOutput = nullptr;
+    m_bootIdx = -1;
+    m_bootTotalSeg = 0;
+    m_bootDone = false;
+
+    /* Restore the normal two-rate cycle. */
+    QMutexLocker lock(&m_mutex);
+    if (m_mgr){
+        if (m_cycle && m_cycleHz > 0){ m_cycle->start(1000 / m_cycleHz); }
+        if (m_tick  && m_hz > 0)     { m_tick ->start(1000 / m_hz); }
+    }
+    lock.unlock();
+
+    if (emitResult){ emit upgradeFinished(idx, ok, message); }
 }
 
 }  // namespace vrmc
