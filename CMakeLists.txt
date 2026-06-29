@@ -17,7 +17,13 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 # ---- Qt6 ----------------------------------------------------------------
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Widgets Charts)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Widgets Charts PrintSupport)
+
+# ---- yaml-cpp -----------------------------------------------------------
+# Schema-v2 test database persistence, mirroring the vr_hand_diagnostic
+# TestRunner. yaml-cpp is shipped as a system package
+# (libyaml-cpp-dev on Debian/Ubuntu).
+find_package(yaml-cpp REQUIRED)
 
 # ---- vr-mc-sdk master libs (via add_subdirectory) -----------------------
 # VR_MC_SDK_DIR defaults to the sibling checkout at ../vr-mc-sdk. Override
@@ -95,6 +101,26 @@ add_executable(vr_mc_diagnostic
     src/backends/CanBackend.hpp
     src/backends/DynamixelDriver.cpp
     src/backends/DynamixelDriver.hpp
+    src/TestRunner/TestRunnerWindow.cpp
+    src/TestRunner/TestRunnerWindow.hpp
+    src/TestRunner/YamlBridge.cpp
+    src/TestRunner/YamlBridge.hpp
+    src/TestRunner/AppConfig.hpp
+    src/TestRunner/HandWorkerCompat.cpp
+    src/TestRunner/HandWorkerCompat.hpp
+    src/TestRunner/AddTestDialog.cpp
+    src/TestRunner/AddTestDialog.hpp
+    src/TestRunner/DatabaseEditDialog.cpp
+    src/TestRunner/DatabaseEditDialog.hpp
+    src/TestRunner/ParamsEditDialog.cpp
+    src/TestRunner/ParamsEditDialog.hpp
+    src/TestRunner/TestDescriptionDialog.cpp
+    src/TestRunner/TestDescriptionDialog.hpp
+    src/TestRunner/TestResultDialog.cpp
+    src/TestRunner/TestResultDialog.hpp
+    # probes/ folder ships as on-disk reference templates only — each
+    # one drives a HandWorker via setPosition / setForce / etc., so it
+    # needs porting to MasterWorker before it can be added to the build.
     resources/vrmc.qrc
 )
 
@@ -108,6 +134,7 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Charts
+    Qt6::PrintSupport
     master_mgr
     motor_drive_cia402_intf
     cia402_master
@@ -116,6 +143,7 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
     motor_drive_feetech_intf
     feetech_servo
     vr_bootmaster          # boot_master + boot_slave + file-input + cofd-output
+    yaml-cpp               # TestRunner schema-v2 IO
 )
 
 
@@ -124,6 +152,18 @@ set_target_properties(vr_mc_diagnostic PROPERTIES
     INSTALL_RPATH "$ORIGIN/zlg/lib")
 
 install(TARGETS vr_mc_diagnostic RUNTIME DESTINATION bin)
+
+# Ship the TestRunner config tree (motorControlTestDB.yaml + future
+# per-hand files) alongside the binary so QStandardPaths::locate finds
+# it at runtime under share/vr_mc_diagnostic/config/.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/config/"
+            DESTINATION share/vr_mc_diagnostic/config
+            FILES_MATCHING
+                PATTERN "*.yaml"
+                PATTERN "*.yml"
+                PATTERN "*.json")
+endif()
 
 # ---- vrmc_sim — in-tree CiA 402 simulator for Help → Start demo ---------
 #

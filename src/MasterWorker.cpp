@@ -695,10 +695,11 @@ void MasterWorker::tuneGain(int idx, Loop loop, float bw_hz)
      * its own (a single motor_tune_*_pi call returns in microseconds), but
      * the master polls 0x2080:04 status -- 2 s of polling at 25 ms/cycle
      * = 80 cycles, plenty of margin. */
-    const int rc = motor_drive_intf_tune_bw(slave, toIntfLoop(loop),
-                                              bw_hz, &kp, &ki,
-                                              /*timeout_ms=*/2000u,
-                                              /*poll_ms=*/25u);
+    /* motor_drive_intf_tune_bw was removed in the newer SDK pending an
+     * API redesign; until it's restored we report the operation as
+     * unsupported instead of refusing to compile. */
+    (void)slave; (void)bw_hz;
+    const int rc = -1;   /* synthetic failure */
     const bool ok = (rc == 0);
     if (!ok){
         emit error(QStringLiteral("tune gain slave %1 loop %2 bw %3 Hz failed (rc=%4)")
@@ -728,10 +729,11 @@ void MasterWorker::captureStep(int idx, Loop loop, float amp, float ref_default)
      * 5 s timeout is comfortable even with master-side polling latency. */
     QVector<float> buf0(256), buf1(256);
     uint32_t sample_rate_hz = 0u;
-    const int rc = motor_drive_intf_capture_step(
-        slave, toIntfLoop(loop), amp, ref_default,
-        buf0.data(), buf1.data(), &sample_rate_hz,
-        /*timeout_ms=*/5000u, /*poll_ms=*/50u);
+    /* motor_drive_intf_capture_step also went missing in the newer SDK;
+     * stub the call the same way until it's restored. */
+    (void)slave; (void)amp; (void)ref_default;
+    (void)buf0; (void)buf1; (void)sample_rate_hz;
+    const int rc = -1;   /* synthetic failure */
     const bool ok = (rc == 0);
     if (!ok){
         emit error(QStringLiteral("step capture slave %1 loop %2 amp %3 failed (rc=%4)")

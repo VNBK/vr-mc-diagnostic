@@ -11,6 +11,8 @@
 #include "FirmwareUpgradeDialog.hpp"
 #include "JointControlPanel.hpp"
 #include "MotorView.hpp"
+#include "TestRunner/TestRunnerWindow.hpp"
+#include "TestRunner/HandWorkerCompat.hpp"
 #include "SlavePickerBar.hpp"
 #include "LogDock.hpp"
 #include "MotorProfile.hpp"
@@ -78,21 +80,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     buildUi();
     wireWorker();
 
-    /* Size the window so every child widget fits without clipping.
-     * The earlier hard 1200×800 default was too tight once the slave
-     * table grew to 11 columns and the per-slave panels expanded.
-     * adjustSize() asks the layout what it actually needs; we then
-     * floor it at 1500×900 so a sparse first-launch (no slaves yet)
-     * still gives the operator room to work, and use the layout's
-     * minimum as the window minimum so the user can't shrink below
-     * a usable size. */
-    adjustSize();
-    const QSize hinted = sizeHint();
-    const int   w      = std::max(1500, hinted.width());
-    const int   h      = std::max(900,  hinted.height());
-    resize(w, h);
-    setMinimumSize(std::min(1200, hinted.width()),
-                   std::min(750,  hinted.height()));
+    /* Window minimum — targets a 1024x600 netbook with room for the
+     * title bar and OS taskbar. Internal QSplitter + QScrollArea
+     * wrappers handle everything below this by scrolling, so the user
+     * can drag the window smaller if they really want to. Mirrors the
+     * sizing policy vr_hand_diagnostic uses. */
+    setMinimumSize(960, 560);
+
+    /* Default startup size: fit the available screen, never overflow
+     * it. Aim for 85% of the work area, clamped to the screen itself
+     * so we never open larger than the display — that traps the title
+     * bar above the screen on 1366x768 panels and there's no way to
+     * drag the window back. */
+    {
+        const QRect avail = screen() ? screen()->availableGeometry()
+                                     : QGuiApplication::primaryScreen()->availableGeometry();
+        const int w = std::min(avail.width(),
+                          std::min(1800, std::max(800,  (int)(avail.width()  * 0.85))));
+        const int h = std::min(avail.height(),
+                          std::min(1100, std::max(540,  (int)(avail.height() * 0.85))));
+        resize(w, h);
+        move(avail.x() + (avail.width()  - w) / 2,
+             avail.y() + (avail.height() - h) / 2);
+    }
 }
 
 MainWindow::~MainWindow()
@@ -503,6 +513,31 @@ void MainWindow::buildMenus()
     dataMenu->addAction(m_exportTelemetry);
     dataMenu->addSeparator();
     dataMenu->addAction(m_clearChartsAct);
+
+    /* Test Runner — schema-v2 YAML-driven test suite. Window opens
+     * non-modally and shares the live MasterWorker so snapshot/config
+     * captures see the current connection state. */
+    {
+        auto* testRunnerAct = new QAction(
+            style->standardIcon(QStyle::SP_FileDialogDetailedView),
+            tr("&Test Runner…"), this);
+        testRunnerAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
+        connect(testRunnerAct, &QAction::triggered, this, [this]{
+            if (!m_testRunner){
+                /* HandWorker shim bridges MasterWorker → HandWorker-
+                 * shaped signals so the cloned TestRunner compiles
+                 * and its snapshot captures see the live state. */
+                m_testRunnerShim = new ::HandWorker(m_worker, this);
+                m_testRunner     = new ::TestRunnerWindow(
+                                       m_testRunnerShim, this);
+            }
+            m_testRunner->show();
+            m_testRunner->raise();
+            m_testRunner->activateWindow();
+        });
+        dataMenu->addSeparator();
+        dataMenu->addAction(testRunnerAct);
+    }
 
     /* --- View --- */
     auto* viewMenu = menuBar()->addMenu(tr("&View"));

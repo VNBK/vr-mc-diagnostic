@@ -1,0 +1,550 @@
+schema_version: 2
+hand_type: MotorControl
+expected_slaves: 1
+expected_dof: 1            # legacy synonym; runner accepts either
+
+_meta: >
+  acquisition_table = flat list of valid metric names.
+  Kind/resolver is derived from prefix at run time:
+    state.*      → snapshot via MasterWorker connection cache
+    config.*     → file-header field (expected_slaves, …)
+    telemetry.*  → window-aggregator over the snapshot stream (not yet wired)
+    probe.*      → invocation of a registered MC probe (not yet wired)
+  Wildcards (probe.<name>.*) are expanded by the runner when the
+  matching probe ships; until then the test row reports the captures
+  as "(not yet supported)" so the gap is visible.
+
+acquisition_table:
+  # ---- connection snapshot --------------------------------------
+  - state.connected
+  - state.slave_count
+  - state.slave_names
+  - state.error_codes
+  - state.controlword
+  - state.statusword
+  - state.operation_mode
+
+  # ---- file-header config ---------------------------------------
+  - config.expected_slaves
+
+  # ---- telemetry window aggregators (placeholder; pending) ------
+  - telemetry.frames
+  - telemetry.frames_malformed
+  - telemetry.cycle_mean_us
+  - telemetry.cycle_p99_us
+  - telemetry.max_gap_us
+
+  # ---- probe outputs (placeholder; pending) ---------------------
+  - probe.cia402_walk.*
+  - probe.encoder.*
+  - probe.current_loop.*
+  - probe.velocity_loop.*
+  - probe.position_loop.*
+  - probe.estop.*
+  - probe.faultreset.*
+
+databases:
+
+  # ============================================================ #
+  # DB1 — Bus & enumeration
+  # ============================================================ #
+  - id: DB1
+    name: Bus & Enumeration
+    description: >
+      Verifies CAN / EtherCAT enumeration, slave count parity with
+      expected_slaves, controlword / statusword bring-up reachability.
+    tests:
+
+      - id: DB1-01
+        name: Slave enumeration
+        description: >
+          Confirms the diagnostic sees the expected number of slaves
+          after a successful connect.
+
+        pre_conditions:
+          - check: "bus.physical_link == 'up'"
+            on_fail: skip
+            msg: Bus cabling and power must be up.
+
+        procedure:
+          - Open the connection.
+          - Read state.slave_count + state.slave_names.
+          - Compare against config.expected_slaves.
+
+        captures:
+          - state.connected
+          - state.slave_count
+          - state.slave_names
+          - config.expected_slaves
+
+        probe_params: {}
+
+        pass_criteria:
+          - check:      "state.slave_count == config.expected_slaves"
+            error_code: ERR_SLAVE_COUNT
+            error_msg:  Slave count does not match expected_slaves from the file header.
+          - check:      "state.connected == true"
+            error_code: ERR_NOT_CONNECTED
+            error_msg:  Connection state is false even though enumeration completed.
+        pass_combiner: AND
+
+        duration_estimate_s: 3
+        num_samples:         1
+        blocks_if_fails:     true
+
+      - id: DB1-02
+        name: Frame parse integrity
+        description: >
+          Counts dropped + malformed snapshot frames over a fixed
+          window. Catches PDO miswiring and bus-load saturation.
+
+        depends_on:
+          - DB1-01
+
+        procedure:
+          - Subscribe to MasterWorker::snapshots for window_s.
+          - Count frames received + malformed.
+
+        captures:
+          - telemetry.frames
+          - telemetry.frames_malformed
+
+        probe_params:
+          window_s:      5.0
+          min_frames:    1
+          max_malformed: 0
+
+        pass_criteria:
+          - check:      "telemetry.frames_malformed <= max_malformed"
+            error_code: ERR_MALFORMED
+            error_msg:  Snapshot stream contains malformed frames — check bus integrity.
+          - check:      "telemetry.frames >= min_frames"
+            error_code: ERR_NO_FRAMES
+            error_msg:  No frames captured in the window.
+        pass_combiner: AND
+
+        duration_estimate_s: 5
+        num_samples:         100
+        blocks_if_fails:     false
+
+      - id: DB1-03
+        name: PDO cycle stability
+        description: >
+          Inter-arrival jitter of snapshot frames. Compares cycle_p99
+          against a configurable ceiling.
+
+        depends_on:
+          - DB1-02
+
+        procedure:
+          - Subscribe for window_s.
+          - Record per-frame arrival timestamps.
+          - Compute mean / p99 / max gap.
+
+        captures:
+          - telemetry.cycle_mean_us
+          - telemetry.cycle_p99_us
+          - telemetry.max_gap_us
+
+        probe_params:
+          window_s:           5.0
+          max_cycle_p99_us:  15000
+          max_gap_ratio:     4.0
+
+        pass_criteria:
+          - check:      "telemetry.cycle_p99_us <= max_cycle_p99_us"
+            error_code: ERR_JITTER_P99
+            error_msg:  Cycle p99 above the configured ceiling — CPU load or scheduler problem.
+          - check:      "div:telemetry.max_gap_us/telemetry.cycle_mean_us <= max_gap_ratio"
+            error_code: ERR_JITTER_GAP
+            error_msg:  Single-frame gap exceeded 4× the mean cycle.
+        pass_combiner: AND
+
+        duration_estimate_s: 5
+        num_samples:         100
+        blocks_if_fails:     false
+
+  # ============================================================ #
+  # DB2 — CiA 402 state machine
+  # ============================================================ #
+  - id: DB2
+    name: CiA 402 state machine
+    description: >
+      Walks the controlword sequence through Switch On Disabled →
+      Ready To Switch On → Switched On → Operation Enabled, then back
+      via Quick Stop. Verifies each transition acks within a latency cap.
+    tests:
+
+      - id: DB2-01
+        name: CiA 402 bring-up walk
+        description: >
+          Step the controlword through the four standard transitions
+          and capture the slave's statusword after each.
+
+        depends_on:
+          - DB1-01
+
+        pre_conditions:
+          - check: "drive.fault == false"
+            on_fail: skip
+            msg: Drive must not be in a latched fault state.
+          - check: "shaft.free == true"
+            on_fail: skip
+            msg: Shaft must be free of mechanical load.
+
+        procedure:
+          - Write controlword = 0x0006 (Shutdown).
+          - Wait apply_settle_ms; read statusword.
+          - Write controlword = 0x0007 (Switch on).
+          - Wait apply_settle_ms; read statusword.
+          - Write controlword = 0x000F (Enable operation).
+          - Wait apply_settle_ms; read statusword.
+          - Write controlword = 0x0002 (Quick stop).
+          - Wait apply_settle_ms; read statusword.
+
+        captures:
+          - probe.cia402_walk.*
+
+        probe_params:
+          probe:                 cia402_walk
+          slave_index:           0
+          apply_settle_ms:       200
+          max_transition_ms:     500
+          steps:
+            - { cw: 0x0006, expected_status_mask: 0x006F, expected_status_value: 0x0021 }
+            - { cw: 0x0007, expected_status_mask: 0x006F, expected_status_value: 0x0023 }
+            - { cw: 0x000F, expected_status_mask: 0x006F, expected_status_value: 0x0027 }
+            - { cw: 0x0002, expected_status_mask: 0x006F, expected_status_value: 0x0007 }
+
+        pass_criteria:
+          - check:      "max_transition_latency_ms <= max_transition_ms"
+            error_code: ERR_CW_LATENCY
+            error_msg:  A controlword transition took longer than the configured cap.
+          - check:      "transitions_acked == transitions_total"
+            error_code: ERR_CW_NACK
+            error_msg:  At least one transition did not reach its expected statusword.
+        pass_combiner: AND
+
+        teardown:
+          - Write controlword = 0x0006 to leave the drive disabled.
+
+        duration_estimate_s: 4
+        num_samples:         4
+        blocks_if_fails:     false
+
+      - id: DB2-02
+        name: Fault reset
+        description: >
+          Inject a fault, then walk controlword bit 7 (Reset Fault) and
+          verify the drive returns to Switch On Disabled.
+
+        depends_on:
+          - DB2-01
+
+        procedure:
+          - Trigger a recoverable fault (e.g. overcurrent injection or a deliberate command-out-of-range).
+          - Confirm statusword reports Fault.
+          - Pulse controlword bit 7 (0x0080), then clear it.
+          - Wait apply_settle_ms; expect Switch On Disabled.
+
+        captures:
+          - probe.faultreset.*
+
+        probe_params:
+          probe:             faultreset
+          slave_index:       0
+          apply_settle_ms:   200
+          max_reset_ms:      500
+
+        pass_criteria:
+          - check:      "reset_latency_ms <= max_reset_ms"
+            error_code: ERR_FAULT_RESET_LATENCY
+            error_msg:  Fault-reset acknowledgement took too long.
+          - check:      "post_reset_state == 'switch_on_disabled'"
+            error_code: ERR_FAULT_RESET_STATE
+            error_msg:  Drive did not return to Switch On Disabled after fault reset.
+        pass_combiner: AND
+
+        duration_estimate_s: 3
+        num_samples:         1
+        blocks_if_fails:     false
+
+  # ============================================================ #
+  # DB3 — Encoder & feedback
+  # ============================================================ #
+  - id: DB3
+    name: Encoder & Feedback
+    description: >
+      Verifies encoder counts, direction parity with motor convention,
+      and absence of step-discontinuities on a slow back-and-forth.
+    tests:
+
+      - id: DB3-01
+        name: Counts per revolution
+        description: >
+          Drive the motor through one full mechanical revolution at
+          low speed, integrate raw encoder counts, compare against
+          the configured CPR.
+
+        depends_on:
+          - DB2-01
+
+        pre_conditions:
+          - check: "shaft.free == true"
+            on_fail: skip
+            msg: Shaft must be free to rotate one full turn.
+
+        procedure:
+          - Enter Profile Velocity mode (0x6060 = 3).
+          - Set target velocity = 0.5 rev/s.
+          - Sample raw encoder counts at 1 kHz until total = 1 revolution.
+          - Compute counts_per_rev_measured.
+
+        captures:
+          - probe.encoder.*
+
+        probe_params:
+          probe:                 encoder
+          slave_index:           0
+          target_velocity_rps:   0.5
+          duration_s:            2.5
+          tolerance_pct:         1.0
+
+        pass_criteria:
+          - check:      "abs_pct_err <= tolerance_pct"
+            error_code: ERR_CPR_MISMATCH
+            error_msg:  Measured counts-per-revolution disagrees with configured CPR by more than 1 %.
+          - check:      "direction == 'expected'"
+            error_code: ERR_CPR_DIRECTION
+            error_msg:  Encoder direction does not match the configured motor convention.
+        pass_combiner: AND
+
+        teardown:
+          - Stop the drive (controlword = 0x0006).
+
+        duration_estimate_s: 5
+        num_samples:         2500
+        blocks_if_fails:     false
+
+  # ============================================================ #
+  # DB4 — Control-loop response
+  # ============================================================ #
+  - id: DB4
+    name: Control loop response
+    description: >
+      Step-response and bandwidth characterisation for the current,
+      velocity, and position loops.
+    tests:
+
+      - id: DB4-01
+        name: Current-loop step
+        description: >
+          Inject a small current step, capture the 256-sample buffer
+          MasterWorker streams via @c stepCaptured, fit rise time and
+          overshoot.
+
+        depends_on:
+          - DB2-01
+
+        procedure:
+          - Enter Profile Torque mode (0x6060 = 4).
+          - Issue a current step of step_milli_pu per-mille.
+          - Wait for stepCaptured to fire.
+          - Compute rise_time_ms + overshoot_pct.
+
+        captures:
+          - probe.current_loop.*
+
+        probe_params:
+          probe:                  current_loop
+          slave_index:            0
+          step_milli_pu:          50
+          settle_ms:              500
+          rise_time_cap_ms:       5.0
+          overshoot_cap_pct:      20.0
+
+        pass_criteria:
+          - check:      "rise_time_ms <= rise_time_cap_ms"
+            error_code: ERR_CURRENT_RISE
+            error_msg:  Current-loop rise time above the configured cap.
+          - check:      "overshoot_pct <= overshoot_cap_pct"
+            error_code: ERR_CURRENT_OVERSHOOT
+            error_msg:  Current-loop overshoot above the configured cap.
+        pass_combiner: AND
+
+        teardown:
+          - Zero the target current and disable the drive.
+
+        duration_estimate_s: 2
+        num_samples:         256
+        blocks_if_fails:     false
+
+      - id: DB4-02
+        name: Velocity-loop step
+        description: >
+          Velocity step from zero to step_rpm, fit rise time +
+          steady-state error.
+
+        depends_on:
+          - DB2-01
+          - DB3-01
+
+        procedure:
+          - Enter Profile Velocity mode (0x6060 = 3).
+          - Step velocity from 0 to step_rpm.
+          - Capture the 256-sample buffer (vel reference + vel measured).
+          - Fit rise time + steady-state error.
+
+        captures:
+          - probe.velocity_loop.*
+
+        probe_params:
+          probe:                  velocity_loop
+          slave_index:            0
+          step_rpm:               300
+          settle_ms:              500
+          rise_time_cap_ms:       30.0
+          ss_err_cap_rpm:         5.0
+
+        pass_criteria:
+          - check:      "rise_time_ms <= rise_time_cap_ms"
+            error_code: ERR_VEL_RISE
+            error_msg:  Velocity-loop rise time above the configured cap.
+          - check:      "steady_state_err_rpm <= ss_err_cap_rpm"
+            error_code: ERR_VEL_SS
+            error_msg:  Velocity-loop steady-state error above the configured cap.
+        pass_combiner: AND
+
+        teardown:
+          - Zero target velocity, disable the drive.
+
+        duration_estimate_s: 3
+        num_samples:         256
+        blocks_if_fails:     false
+
+      - id: DB4-03
+        name: Position-loop step
+        description: >
+          Small position step (one revolution) — fit rise time +
+          settling time + steady-state error.
+
+        depends_on:
+          - DB4-02
+
+        procedure:
+          - Enter Profile Position mode (0x6060 = 1).
+          - Step target position by step_counts.
+          - Capture vel + pos buffer.
+
+        captures:
+          - probe.position_loop.*
+
+        probe_params:
+          probe:                  position_loop
+          slave_index:            0
+          step_counts:            10000
+          settle_ms:              1000
+          rise_time_cap_ms:       100.0
+          settling_time_cap_ms:   300.0
+          ss_err_counts_cap:      10
+
+        pass_criteria:
+          - check:      "rise_time_ms <= rise_time_cap_ms"
+            error_code: ERR_POS_RISE
+            error_msg:  Position-loop rise time above the configured cap.
+          - check:      "settling_time_ms <= settling_time_cap_ms"
+            error_code: ERR_POS_SETTLE
+            error_msg:  Position-loop settling time above the configured cap.
+          - check:      "ss_err_counts <= ss_err_counts_cap"
+            error_code: ERR_POS_SS
+            error_msg:  Position-loop steady-state error above the configured cap.
+        pass_combiner: AND
+
+        teardown:
+          - Drive back to start, disable the drive.
+
+        duration_estimate_s: 3
+        num_samples:         256
+        blocks_if_fails:     false
+
+  # ============================================================ #
+  # DB5 — Safety
+  # ============================================================ #
+  - id: DB5
+    name: Safety
+    description: >
+      Emergency stop latency + latched-fault detection.
+    tests:
+
+      - id: DB5-01
+        name: Emergency stop
+        description: >
+          Drive at constant velocity, fire MasterWorker::disableAll,
+          time until reported velocity drops below threshold.
+
+        depends_on:
+          - DB2-01
+
+        pre_conditions:
+          - check: "shaft.free == true"
+            on_fail: skip
+            msg: Shaft must be free.
+          - check: "operator.clear == true"
+            on_fail: skip
+            msg: Operator clear of the moving shaft.
+
+        procedure:
+          - Enter Profile Velocity mode, command 200 rpm.
+          - Wait pre_drive_ms.
+          - Call MasterWorker::disableAll().
+          - Watch velocity feedback until below velocity_threshold_rpm.
+
+        captures:
+          - probe.estop.*
+
+        probe_params:
+          probe:                      estop
+          slave_index:                0
+          pre_drive_ms:               500
+          velocity_threshold_rpm:     5
+          max_estop_latency_ms:       300
+
+        pass_criteria:
+          - check:      "estop_latency_ms <= max_estop_latency_ms"
+            error_code: ERR_ESTOP_LATENCY
+            error_msg:  E-stop latency above the configured cap — safety-critical regression.
+        pass_combiner: AND
+
+        teardown:
+          - Confirm the drive is in Switch On Disabled.
+
+        duration_estimate_s: 2
+        num_samples:         1
+        blocks_if_fails:     false
+
+      - id: DB5-02
+        name: Latched-fault scan
+        description: >
+          Snapshot every slave's error code, count non-zero.
+
+        depends_on:
+          - DB1-01
+
+        procedure:
+          - Read state.error_codes (one per slave).
+          - Count non-zero.
+
+        captures:
+          - state.error_codes
+
+        probe_params: {}
+
+        pass_criteria:
+          - check:      "count_nonzero:state.error_codes == 0"
+            error_code: ERR_LATCHED
+            error_msg:  One or more slaves has a latched error code — clear before retry.
+        pass_combiner: AND
+
+        duration_estimate_s: 1
+        num_samples:         1
+        blocks_if_fails:     false

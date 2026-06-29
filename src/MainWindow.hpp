@@ -23,6 +23,11 @@ class QTextStream;
 
 QT_FORWARD_DECLARE_CLASS(QTabWidget)
 
+/* Cloned-from-Hand TestRunner classes live at global scope; forward-
+ * declare here so MainWindow can hold pointers to them. */
+class TestRunnerWindow;
+class HandWorker;
+
 namespace vrmc {
 
 class ConnectionDialog;
@@ -158,6 +163,12 @@ private:
 
     QThread           m_workerThread;
     MasterWorker*     m_worker    = nullptr;
+    /* Lazily-created schema-v2 test runner window. Lives as long as
+     * the MainWindow; the cloned vr_hand_diagnostic TestRunner runs
+     * against a HandWorker-shaped shim that bridges to MasterWorker —
+     * both globally-scoped. */
+    ::TestRunnerWindow* m_testRunner = nullptr;
+    ::HandWorker*       m_testRunnerShim = nullptr;
 
     /* Telemetry recording state. m_recordFile is non-null while a
      * recording is in progress; closed on toggle-off / disconnect. */
