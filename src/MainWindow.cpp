@@ -1211,6 +1211,34 @@ void MainWindow::onUploadFirmware()
             m_worker, &MasterWorker::startFirmwareUpgrade);
     connect(&dlg, &FirmwareUpgradeDialog::cancelRequested,
             m_worker, &MasterWorker::cancelFirmwareUpgrade);
+
+    /* Bootloader target: Start -> open the Connect dialog (pick UDP sim /
+     * ZLG hardware), connect OFFLINE to the boot node, then flash it as
+     * slave idx 0. */
+    connect(&dlg, &FirmwareUpgradeDialog::bootloaderRequested, &dlg,
+            [this, &dlg](const QString& path){
+        ConnectionDialog cdlg(this);
+        cdlg.presetForBootloader(10);
+        if (cdlg.exec() != QDialog::Accepted){
+            dlg.onFinished(0, false, tr("cancelled — no connection opened"));
+            return;
+        }
+        CanConfig cfg     = cdlg.config();
+        cfg.count         = 1;
+        cfg.allow_offline = true;   /* boot node sends no PDO heartbeat */
+        connectWithConfig(cfg);
+
+        /* The allow_offline connect settles in <200 ms; give it margin then
+         * flash. startFirmwareUpgrade emits upgradeFinished("not connected")
+         * if the transport failed to open (e.g. no ZLG adapter), so the
+         * dialog gets a clean result with no extra error wiring. */
+        QTimer::singleShot(800, &dlg, [this, path]{   /* &dlg: auto-cancel if closed */
+            QMetaObject::invokeMethod(m_worker, [w = m_worker, path]{
+                w->startFirmwareUpgrade(0, path);
+            }, Qt::QueuedConnection);
+        });
+    });
+
     connect(m_worker, &MasterWorker::upgradeProgress,
             &dlg, &FirmwareUpgradeDialog::onProgress);
     connect(m_worker, &MasterWorker::upgradeFinished,

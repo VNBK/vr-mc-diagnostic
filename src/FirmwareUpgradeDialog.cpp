@@ -84,19 +84,20 @@ FirmwareUpgradeDialog::FirmwareUpgradeDialog(QWidget* parent) : QDialog(parent)
 void FirmwareUpgradeDialog::setSlaves(const QVector<SlaveSnapshot>& snaps)
 {
     m_target->clear();
-    if (snaps.isEmpty()){
-        m_target->addItem(tr("(no slaves — connect first)"));
-        m_target->setEnabled(false);
-        m_start->setEnabled(false);
-        return;
-    }
-    m_target->setEnabled(true);
-    m_start->setEnabled(true);
+    /* Live CiA-402 slaves first (data = slave index, >= 0). */
     for (const auto& s : snaps){
         const QString label = QStringLiteral("idx %1 — id %2 — %3")
                                   .arg(s.idx).arg(s.id).arg(s.name);
         m_target->addItem(label, s.idx);
     }
+    /* Always offer the Bootloader target (data = -1). A board sitting in its
+     * bootloader never shows as a live slave (no PDO heartbeat), so this is
+     * the only way to select it; choosing it makes MainWindow open the
+     * Connect dialog and flash the boot node. The combo is therefore never
+     * empty, so the target + Start stay enabled. */
+    m_target->addItem(tr("Bootloader (open connection…)"), -1);
+    m_target->setEnabled(true);
+    m_start->setEnabled(true);
 }
 
 void FirmwareUpgradeDialog::onBrowse()
@@ -118,25 +119,30 @@ void FirmwareUpgradeDialog::onStart()
             tr("Pick a firmware image first."));
         return;
     }
-    if (m_target->count() == 0 || !m_target->isEnabled()){
-        QMessageBox::information(this, windowTitle(),
-            tr("Connect to a drive first so we have a target slave."));
-        return;
-    }
     const QVariant data = m_target->currentData();
     if (!data.isValid()){
         QMessageBox::information(this, windowTitle(),
-            tr("Select a valid target slave."));
+            tr("Select a valid target."));
         return;
     }
-    const int ret = QMessageBox::warning(this, windowTitle(),
-        tr("This resets slave %1 into its bootloader and overwrites its "
-           "application flash. Do not power off during the upgrade.\n\nProceed?")
-            .arg(m_target->currentText()),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (ret != QMessageBox::Yes){ return; }
+    const int sel = data.toInt();
+    const bool bootloaderTarget = (sel < 0);   /* -1 = the Bootloader entry */
 
-    m_activeIdx = data.toInt();
+    const QString warn = bootloaderTarget
+        ? tr("This opens a connection to the bootloader node and overwrites "
+             "its application flash. Do not power off during the upgrade."
+             "\n\nProceed?")
+        : tr("This resets slave %1 into its bootloader and overwrites its "
+             "application flash. Do not power off during the upgrade.\n\nProceed?")
+              .arg(m_target->currentText());
+    if (QMessageBox::warning(this, windowTitle(), warn,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes){
+        return;
+    }
+
+    /* After the offline connect the boot node registers as slave idx 0, so
+     * progress/finished arrive with idx 0 for the bootloader target. */
+    m_activeIdx = bootloaderTarget ? 0 : sel;
     m_running   = true;
     m_bar->setValue(0);
     m_start->setEnabled(false);
@@ -147,7 +153,12 @@ void FirmwareUpgradeDialog::onStart()
     appendLog(tr("=== upgrade started: %1 → %2")
                   .arg(QFileInfo(m_path->text()).fileName())
                   .arg(m_target->currentText()));
-    emit startRequested(m_activeIdx, m_path->text());
+
+    if (bootloaderTarget){
+        emit bootloaderRequested(m_path->text());
+    } else {
+        emit startRequested(sel, m_path->text());
+    }
 }
 
 void FirmwareUpgradeDialog::onCancel()
