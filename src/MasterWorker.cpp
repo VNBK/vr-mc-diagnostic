@@ -16,6 +16,7 @@ extern "C" {
 #include "boot_master.h"
 #include "boot_slave.h"
 #include "interface/boot_if_impl.h"
+#include "interface/boot_cofd_od.h"   /* BOOT_COFD_NODE_ID_DEFAULT (bootloader USDO node) */
 }
 
 #include <QFileInfo>
@@ -1324,7 +1325,7 @@ namespace {
  * automated (set boot_metadata upgrade flag + SysCtl_resetDevice). */
 constexpr uint16_t kEnterBootIndex = 0x2F00u;   /* vendor: reset-to-boot   */
 constexpr uint8_t  kEnterBootSub   = 0x00u;
-constexpr uint32_t kEnterBootMagic = 0x544F4F42u; /* "BOOT" little-endian  */
+constexpr uint32_t kEnterBootMagic = 0xAA55A55Au; /* "BOOT" little-endian  */
 }  // namespace
 
 void MasterWorker::onBootEventThunk(uint8_t ev, int32_t detail, void* arg)
@@ -1405,31 +1406,63 @@ void MasterWorker::startFirmwareUpgrade(int idx, QString path)
     m_bootTotalSeg = static_cast<int>((fi.size() + SEGMENT_DATA_SIZE - 1)
                                       / SEGMENT_DATA_SIZE);
 
-    /* (1) Best-effort enter-boot: ask the running app to reset into its
-     * bootloader. Harmless abort if unimplemented. */
+    /* (1) Enter-boot: tell the RUNNING app (on its own node) to reset into the
+     * bootloader. The app acks the write, then defers the reset, so the SDO
+     * succeeds. If the object is unimplemented the write aborts and we proceed
+     * anyway (operator may have put the board in bootloader mode manually). */
+    const uint8_t appNode  = nodeId;
+    const uint8_t bootNode = BOOT_COFD_NODE_ID_DEFAULT;   /* bootloader's fixed USDO node */
     {
         QString err;
         uint32_t magic = kEnterBootMagic;
         if (m_can.writeSdo(idx, kEnterBootIndex, kEnterBootSub,
                            &magic, 4, &err) != 0){
-            emit info(tr("enter-boot SDO not acked (%1) — assuming the board "
-                         "is already in bootloader mode").arg(err));
+            emit info(tr("enter-boot not acked (%1) — assuming board already in "
+                         "bootloader mode").arg(err));
         } else {
-            emit info(tr("enter-boot sent to slave %1; waiting for bootloader")
-                          .arg(idx));
+            emit info(tr("enter-boot sent to node %1; rebooting into bootloader")
+                          .arg(appNode));
         }
     }
 
     /* (2) Pause the normal PDO cycle + UI refresh for the duration. */
     if (m_cycle){ m_cycle->stop(); }
     if (m_tick) { m_tick->stop();  }
+    lock.unlock();
 
-    /* (3) Assemble the boot master over the live CAN handle. */
+    /* (3) Drive the boot protocol at the BOOTLOADER's node -- not the app's.
+     * If we just asked the app to reboot (appNode != bootNode), give the board
+     * time to reset + bring the bootloader up before REQUEST_UPGRADE. Deferred
+     * so we don't block the worker's event loop; QTimer drops the call if the
+     * worker is destroyed first. */
+    const int delayMs = (appNode != bootNode) ? 1500 : 0;
+    QTimer::singleShot(delayMs, this, [this, idx, path, bootNode]{
+        beginBootSession(idx, path, bootNode);
+    });
+}
+
+void MasterWorker::beginBootSession(int idx, QString path, uint8_t bootNode)
+{
+    if (m_bootMaster){
+        emit upgradeFinished(idx, false, tr("an upgrade is already running"));
+        return;
+    }
+    void* canh = m_can.canHandle();
+    if (!canh){
+        emit upgradeFinished(idx, false,
+            tr("firmware upgrade needs a CAN-FD transport (UDP/ZLG)"));
+        return;
+    }
+
+    QMutexLocker lock(&m_mutex);
+
+    /* Assemble the boot master over the live CAN handle, addressing the
+     * bootloader node (the board should now be in bootloader mode). */
     boot_master_t* master = boot_master_create();
     boot_input_t*  input  = boot_input_file_create(path.toUtf8().constData());
-    boot_output_t* output = boot_output_cofd_create(canh, nodeId);
+    boot_output_t* output = boot_output_cofd_create(canh, bootNode);
     boot_slave_t*  slave  = (input && output)
-        ? boot_slave_create(nodeId, input, output, master) : nullptr;
+        ? boot_slave_create(bootNode, input, output, master) : nullptr;
     const bool added = (master && slave &&
                         boot_master_add_slave(master, slave) >= 0);
 
@@ -1464,8 +1497,8 @@ void MasterWorker::startFirmwareUpgrade(int idx, QString path)
     }
 
     lock.unlock();
-    emit info(tr("firmware upgrade started: %1 → slave %2 (node %3, %4 segments)")
-                  .arg(fi.fileName()).arg(idx).arg(nodeId).arg(m_bootTotalSeg));
+    emit info(tr("firmware upgrade started: %1 → bootloader node %2 (%3 segments)")
+                  .arg(QFileInfo(path).fileName()).arg(bootNode).arg(m_bootTotalSeg));
     m_bootTimer->start(1);   /* ~1 kHz pump */
 }
 

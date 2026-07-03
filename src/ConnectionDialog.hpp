@@ -24,6 +24,11 @@ public:
 
     CanConfig config() const;
 
+    /** Pre-fill for attaching to a board in its bootloader: node id + a
+     *  single-slave count. The operator still picks the transport (UDP sim
+     *  vs ZLG hardware). MainWindow forces allow_offline on the result. */
+    void presetForBootloader(int nodeId);
+
 private slots:
     void onTransportChanged();
 

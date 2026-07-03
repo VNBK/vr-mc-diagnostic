@@ -366,6 +366,11 @@ private slots:
 
 private:
     void teardown();
+    /** Second half of startFirmwareUpgrade: build the boot session and start
+     *  streaming, addressing @p bootNode (the bootloader's USDO node). Run
+     *  deferred so the board has time to reboot from the app into the
+     *  bootloader after the enter-boot command. */
+    void beginBootSession(int idx, QString path, uint8_t bootNode);
     /** Tear down the boot session, restore the normal PDO cycle, and
      *  (optionally) emit the terminal result. Idempotent. */
     void bootTeardown(bool emitResult, bool ok, const QString& message);

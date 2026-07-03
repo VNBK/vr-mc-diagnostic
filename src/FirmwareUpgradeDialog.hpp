@@ -32,8 +32,12 @@ public:
     void setSlaves(const QVector<vrmc::SlaveSnapshot>& snaps);
 
 signals:
-    /** Operator hit Start: stream @p path to @p slaveIdx. */
+    /** Operator hit Start with a live slave target: stream @p path to it. */
     void startRequested(int slaveIdx, QString path);
+    /** Operator hit Start with the "Bootloader" target: the board is already
+     *  in its bootloader, so MainWindow opens a connection (Connect dialog)
+     *  and then flashes it. */
+    void bootloaderRequested(QString path);
     /** Operator hit Cancel during an in-flight upgrade. */
     void cancelRequested();
 

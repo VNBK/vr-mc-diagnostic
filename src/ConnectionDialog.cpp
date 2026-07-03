@@ -126,6 +126,14 @@ void ConnectionDialog::onTransportChanged()
     adjustSize();
 }
 
+void ConnectionDialog::presetForBootloader(int nodeId)
+{
+    m_firstId->setValue(nodeId);
+    m_count->setValue(1);
+    setWindowTitle(tr("Connect to bootloader node %1 — pick transport")
+                       .arg(nodeId));
+}
+
 CanConfig ConnectionDialog::config() const
 {
     CanConfig c;
