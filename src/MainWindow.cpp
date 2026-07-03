@@ -1218,7 +1218,7 @@ void MainWindow::onUploadFirmware()
     connect(&dlg, &FirmwareUpgradeDialog::bootloaderRequested, &dlg,
             [this, &dlg](const QString& path){
         ConnectionDialog cdlg(this);
-        cdlg.presetForBootloader(10);
+        cdlg.presetForBootloader(1);
         if (cdlg.exec() != QDialog::Accepted){
             dlg.onFinished(0, false, tr("cancelled — no connection opened"));
             return;
