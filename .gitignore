@@ -2,3 +2,5 @@ build/
 Debug/
 Release/
 cmake-build-debug/
+install*
+log*

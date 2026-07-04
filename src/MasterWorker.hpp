@@ -12,6 +12,7 @@
 #include "backends/CanBackend.hpp"
 #include "MotorProfile.hpp"      /* MotorParams (writeMotorProfile) */
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMutex>
 #include <QObject>
@@ -300,7 +301,17 @@ public slots:
      *  session down and restores the PDO cycle. */
     void cancelFirmwareUpgrade();
 
+    /** Run-in ("roda"): put slave @p idx into CiA-402 velocity mode and spin
+     *  it forward for @p fwdSec, then reverse for @p revSec, repeating until
+     *  @p totalSec elapses (0 = until stopRunIn). Speed in rpm. */
+    void startRunIn(int idx, double speedRpm, int fwdSec, int revSec, int totalSec);
+    /** Stop an in-flight run-in: zero the target and disable the drive. */
+    void stopRunIn();
+
 signals:
+    /** Run-in state for the dialog: @p running toggles Start/Stop + input lock;
+     *  @p text is a short status line. */
+    void runInStatus(bool running, QString text);
     void connected(int slaveCount);
     void disconnected();
     void error(const QString& msg);
@@ -363,6 +374,7 @@ private slots:
     void onCycleTick();             /**< PDO cycle: send 1 RPDO per slot     */
     void onGenTick();               /**< QTimer callback pushing waveform value */
     void onBootTick();              /**< pump + boot_master_process during upgrade */
+    void onRunInTick();             /**< flip fwd/rev + auto-stop during run-in    */
 
 private:
     void teardown();
@@ -428,6 +440,15 @@ private:
     int                         m_bootIdx    = -1;
     int                         m_bootTotalSeg = 0;     /* for % progress  */
     bool                        m_bootDone   = false;   /* finish latched  */
+
+    /* Run-in ("roda") state. m_runInTimer flips direction / auto-stops. */
+    QTimer*                     m_runInTimer = nullptr;
+    QElapsedTimer               m_runInClock;           /* since start     */
+    int                         m_runInIdx   = -1;      /* -1 = not running */
+    double                      m_runInRadS  = 0.0;     /* |speed| rad/s   */
+    int                         m_runInFwdMs = 0, m_runInRevMs = 0;
+    int                         m_runInTotalMs = 0;     /* 0 = until stop  */
+    int                         m_runInDir   = 0;       /* 0/+1/-1 current  */
 
     /* Last commanded setpoint per slave (indexed by slave idx). */
     struct CmdCache { float pos = 0.0f; float vel = 0.0f; float trq = 0.0f;

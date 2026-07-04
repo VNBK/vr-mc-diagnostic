@@ -5,6 +5,7 @@
 
 #include "ConnectionDialog.hpp"
 #include "DriveConfigDialog.hpp"
+#include "RunInDialog.hpp"
 
 #include <QComboBox>
 #include "GainEditor.hpp"
@@ -617,6 +618,14 @@ void MainWindow::buildToolbar()
     toolbar->addAction(pdoMapAct);
     toolbar->addSeparator();
     toolbar->addAction(m_deviceInfoAct);
+
+    /* Run-in ("Roda") — modeless dialog to spin the selected drive
+     * forward/reverse for a duration. */
+    m_runInAct = new QAction(tr("Run-in"), this);
+    m_runInAct->setIcon(makeWindowIcon(QColor("#a15c3b")));
+    m_runInAct->setToolTip(tr("Motor run-in (roda): forward/reverse cycling"));
+    connect(m_runInAct, &QAction::triggered, this, &MainWindow::onShowRunIn);
+    toolbar->addAction(m_runInAct);
 
     /* Tint each toggle-view button's background to match its icon when
      * checked, so the operator can see at-a-glance which panes are
@@ -1350,6 +1359,33 @@ void MainWindow::setLeftTab(int idx)
     if (m_leftTabs && idx >= 0 && idx < m_leftTabs->count()){
         m_leftTabs->setCurrentIndex(idx);
     }
+}
+
+void MainWindow::onShowRunIn()
+{
+    if (!m_runInDlg){
+        m_runInDlg = new RunInDialog(this);
+        connect(m_runInDlg, &RunInDialog::startRequested, this,
+            [this](double rpm, int fwd, int rev, int total){
+                const int idx = selectedSlaveIdx();
+                if (idx < 0){
+                    QMessageBox::information(this, tr("Run-in"),
+                        tr("Select a slave in the table first."));
+                    return;
+                }
+                QMetaObject::invokeMethod(m_worker, "startRunIn", Qt::QueuedConnection,
+                    Q_ARG(int, idx), Q_ARG(double, rpm),
+                    Q_ARG(int, fwd), Q_ARG(int, rev), Q_ARG(int, total));
+            });
+        connect(m_runInDlg, &RunInDialog::stopRequested, this, [this]{
+            QMetaObject::invokeMethod(m_worker, "stopRunIn", Qt::QueuedConnection);
+        });
+        connect(m_worker, &MasterWorker::runInStatus,
+                m_runInDlg, &RunInDialog::setRunning, Qt::QueuedConnection);
+    }
+    m_runInDlg->show();
+    m_runInDlg->raise();
+    m_runInDlg->activateWindow();
 }
 
 void MainWindow::onConfigureDrive()

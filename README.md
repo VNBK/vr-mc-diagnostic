@@ -48,6 +48,95 @@ available.
 - **Help → Start demo** — spawns N copies of the in-tree
   simulator (`vrmc_sim`) and auto-connects. No SDK build needed.
 
+## Roadmap — required features still missing
+
+Gaps a production-grade motor-control diagnostic is expected to cover
+but this tool does not yet (or only partially) implement. Ordered by
+priority. OD indices reference the drive object dictionary.
+
+### Must-have
+
+1. **Fault / EMCY diagnostics.** Today: raw `errorCode` field +
+   *Fault reset* button only. Missing: decode of **0x1001** (error
+   register bits — over-current / -voltage / -temperature / encoder…),
+   **0x1003** (predefined error field = *fault history*), live **EMCY**
+   frame capture, and a human-readable fault-code table. *(Highest-value
+   gap — SDO-only, no board change.)*
+2. **CiA-402 homing (mode 6).** The current *Home* button is only a
+   position preset of `0`. Missing the real procedure: **0x6098** method,
+   **0x607C** offset, **0x6099** speeds, **0x609A** accel;
+   home-to-index / limit-switch.
+3. **Object-Dictionary browser.** Only a manual "type the index" Custom-SDO
+   poke exists (Configure-drive tab). Missing: a named OD tree with
+   type/unit metadata, read-all, and a live watch list.
+4. **Parameter backup / restore to file + diff.** Only flash-persist
+   (**0x1010**) and default-restore (**0x1011**) exist. Missing: dump the
+   full parameter set to a file, reload onto another drive, and diff
+   against a golden reference (production / board-swap workflow).
+
+### Should-have
+
+5. **Triggered oscilloscope.** Telemetry is free-running + record only.
+   Missing: threshold / statusword-bit trigger with pre/post capture. The
+   high-rate path already exists in Auto-Tune (**0x2080**) and can be reused.
+6. **Auto-identification / commissioning wizard** — see below.
+7. **Live protection dashboard.** Configure-drive only *sets* limits.
+   Missing: actual-vs-threshold view (current / temperature / bus-V /
+   following-error) with a warning banner before a trip.
+8. **CAN bus health + NMT.** Heartbeat exists only at transport level.
+   Missing: heartbeat-timeout / bus-off / error-counter view,
+   node-guarding, and NMT start/stop/reset-node control.
+
+### Auto-identification / commissioning wizard (feature 6, detailed)
+
+Much of the engine already lives **on the board** (`0x2030` V/f open-loop,
+`0x2031` calibration control, `0x2080` model-based PI tuner). The missing
+piece is a diagnostic-side wizard that **sequences** these primitives,
+**gates** each step pass/fail, and **writes results back** to the motor
+profile (`0x2070`). Markers: ✅ = board primitive exists (orchestrate now),
+⚠️ = needs new firmware.
+
+- **Phase 0 — Prep / safety.** Load name-plate into profile **0x2070**
+  (pole pairs, rated V/I/speed/torque, motor type); set current/torque
+  limits (0x6073/0x6072); check bus-V; confirm the shaft can spin. ✅
+- **Phase 1 — Current-sense offset calibration** (drive disabled). Zero
+  the phase-current ADC offsets so every later current reading is
+  trustworthy. Board: **`0x2030:1 = 1`**, poll done. ✅ Optional analog-
+  encoder sin/cos min-max calibration (TMAG6180). ✅
+- **Phase 2 — Electrical parameter identification** (the real "auto-ID").
+  Currently entered **by hand from the name-plate**; true measurement
+  needs firmware ⚠️:
+  - **Rs** — inject d-axis DC current (rotor held), V/I → Rs → **0x2070:04**.
+  - **Ls_d / Ls_q** — inject HF AC voltage on d then q, |I|/phase →
+    `L = V/(2πf·I)` → **0x2070:05/06**.
+  - **λ_m (PM flux / BEMF constant)** — spin open-loop via V/f
+    (**0x2030**, ✅ can spin) at constant speed, measure back-EMF →
+    `λ = V_bemf/ω_e` (⇒ Kt) → **0x2070:07/09** (estimator ⚠️).
+- **Phase 3 — Encoder / commutation alignment.** Find electrical zero
+  (inject d-axis current → rotor locks to d → encoder reading = offset),
+  store `alignment_offset_rad`; check direction/polarity and pole-pair
+  sanity; seek index/home. Board: **`0x2031:1 = 5`** (3FL_2 align), poll
+  **0x2031:2**. ✅
+- **Phase 4 — Current loop: seed + verify.** Model-based seed from
+  profile: `0x2080:01=0` (current), `:02=<bw>`, `:03=1` (trigger),
+  poll `:04==0`, read **Kp/Ki = 0x60F6:01/02**; then verify with a step
+  capture (Auto-Tune → *Capture Step*) and refine BW. ✅
+- **Phase 5 — Velocity loop (+ inertia).** **J** identification —
+  known torque step, `J = T/(dω/dt)` → **0x2070:08** ⚠️. Tune velocity PI
+  (`0x2080:01=1`) + verify step. ✅
+- **Phase 6 — Position loop.** Tune (`0x2080:01=2`) + verify step. ✅
+- **Phase 7 — Persist.** Flash-save via **0x1010:01** (all) or **:05**
+  (motor). ✅
+
+**Wizard responsibilities (diagnostic side):** run Phases 1→7 as guided
+pages with progress + status polling; gate pass/fail between steps (offset
+drift, align `status < 0`, step overshoot over threshold); write results
+into **0x2070** with a before/after table; and provide a safe abort
+(disable + quick-stop) at every step. A semi-automatic version can ship
+immediately using the ✅ primitives (offset → align → seed all three loops
+→ verify → save), leaving the ⚠️ R/L/λ/J fields as name-plate entry until
+the identification routines land in firmware.
+
 ## Build
 
 ```bash

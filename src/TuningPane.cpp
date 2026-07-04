@@ -19,6 +19,7 @@
 #include <QVBoxLayout>
 
 #include <QPainter>
+#include <QPen>
 
 #include <algorithm>
 #include <cmath>
@@ -758,8 +759,18 @@ AutoTuneView::AutoTuneView(QWidget* parent) : QWidget(parent)
      * fine for a rough plot. */
     m_meas = new QLineSeries;
     m_ref  = new QLineSeries;
-    m_meas->setName(tr("Measured (buf0)"));
-    m_ref ->setName(tr("Reference / Iq (buf1)"));
+    /* Fixed roles for every loop: buf0 -> Actual, second series ->
+     * Setpoint. Colours are pinned so Actual/Setpoint never swap hues
+     * between loops (Qt would otherwise theme them by add order only). */
+    m_meas->setName(tr("Actual"));
+    m_ref ->setName(tr("Setpoint"));
+    m_meas->setColor(QColor(0x1f, 0x77, 0xb4));           /* Actual — blue   */
+    {
+        QPen spPen(QColor(0xd6, 0x27, 0x28));             /* Setpoint — red  */
+        spPen.setStyle(Qt::DashLine);
+        spPen.setWidthF(1.5);
+        m_ref->setPen(spPen);
+    }
 
     m_chart = new QChart;
     m_chart->addSeries(m_meas);
@@ -980,7 +991,22 @@ void AutoTuneView::onStepCaptured(int idx, Loop loop,
     const Loop l = static_cast<Loop>(m_loop->currentData().toInt());
     if (loop != l){ return; }
     if (ok && buf0.size() == 256 && buf1.size() == 256){
-        replotStep(buf0, buf1, sample_rate_hz);
+        /* Every loop plots exactly two traces: Actual and Setpoint.
+         *   buf0 is ALWAYS the loop's ACTUAL (the board picks the source
+         *   from the loop code -- Iq / velocity / position).
+         * The SETPOINT trace:
+         *   - position loop: buf1 IS the captured cmd, use it directly;
+         *   - current/velocity: the board pairs buf0 with a cross-variable
+         *     (speed / Iq), NOT a setpoint, so synthesise a flat setpoint
+         *     at the commanded step level (ref_default + Step amp). */
+        const double commanded = m_refDefault->value() + m_amp->value();
+        QVector<float> setpoint(buf0.size());
+        if (loop == Loop::Position){
+            setpoint = buf1;                                  /* board cmd */
+        } else {
+            setpoint.fill(static_cast<float>(commanded));     /* from Step amp */
+        }
+        replotStep(buf0, setpoint, sample_rate_hz);
 
         /* Analyse the measured response (buf0) against the commanded step
          * (ref_default -> ref_default + amp). dt comes from the board's
@@ -990,7 +1016,6 @@ void AutoTuneView::onStepCaptured(int idx, Loop loop,
         t.reserve(buf0.size());
         y.reserve(buf0.size());
         for (int i = 0; i < buf0.size(); ++i){ t.push_back(i * dt); y.push_back(buf0[i]); }
-        const double commanded = m_refDefault->value() + m_amp->value();
         m_metrics->setText(formatStepMetrics(computeStepMetrics(t, y, commanded)));
 
         m_captureStatus->setText(tr("done @ %1 kHz").arg(sample_rate_hz / 1000.0, 0, 'f', 1));

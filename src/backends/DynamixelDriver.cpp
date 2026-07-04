@@ -561,6 +561,8 @@ static const motor_drive_intf_proc_t kDxlProc = {
     /* tune_bw + capture_step were retired from the SDK interface;
      * dynamixel never implemented them anyway, so this is a no-op
      * shape change. */
+    /* tune_bw          */ nullptr,
+    /* capture_step     */ nullptr,
     /* .get_position    */ op_get_position,
     /* .get_velocity    */ op_get_velocity,
     /* .get_torque      */ op_get_torque,

@@ -32,6 +32,7 @@ namespace vrmc {
 
 class ConnectionDialog;
 class DriveConfigDialog;
+class RunInDialog;
 class GainEditor;
 class JointControlPanel;
 class LogDock;
@@ -91,6 +92,8 @@ private slots:
     void onFactoryReset();
     void onUploadFirmware();
     void onConfigureDrive();
+    /** Show the modeless run-in ("roda") dialog (toolbar button). */
+    void onShowRunIn();
     void onDeviceInfo();
     void onDeviceInfoResult(int idx, vrmc::DeviceInfo info, bool ok,
                             QString message);
@@ -224,10 +227,13 @@ private:
     QAction*          m_uploadFirmwareAct = nullptr;
     QAction*          m_configureDriveAct = nullptr;
     QAction*          m_deviceInfoAct     = nullptr;
+    QAction*          m_runInAct          = nullptr;   /* toolbar: run-in */
 
     /* Modeless drive-config dialog, created on demand so it can sit
      * next to the main window while the operator tweaks values. */
     DriveConfigDialog* m_driveCfgDlg = nullptr;
+    /* Modeless run-in ("roda") dialog, created on demand. */
+    RunInDialog*       m_runInDlg    = nullptr;
 
     /* Data. */
     QAction*          m_recordAct         = nullptr;

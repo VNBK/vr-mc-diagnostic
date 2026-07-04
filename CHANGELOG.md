@@ -10,6 +10,17 @@ A user-facing copy of the latest release notes is also embedded in
 the user guide (`docs/VinRobotics_MC_Diagnostic_User_Guide.md`,
 appendix section "G. Changelog").
 
+## 1.0.2 — 2026-07-03
+
+### Fixbug
+- NONE
+
+### Upgrade firmware
+- Add reboot SDO to jump to bootloader when upgrading process. 
+
+### TestRunner
+- Support TestRunner with basic testcase.
+---
 
 ## 1.0.1 — 2026-06-23
 

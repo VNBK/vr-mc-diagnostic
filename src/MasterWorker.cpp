@@ -71,6 +71,9 @@ MasterWorker::MasterWorker(QObject* parent) : QObject(parent)
     m_bootTimer = new QTimer(this);
     m_bootTimer->setTimerType(Qt::PreciseTimer);
     connect(m_bootTimer, &QTimer::timeout, this, &MasterWorker::onBootTick);
+
+    m_runInTimer = new QTimer(this);
+    connect(m_runInTimer, &QTimer::timeout, this, &MasterWorker::onRunInTick);
 }
 
 MasterWorker::~MasterWorker() { teardown(); }
@@ -700,7 +703,10 @@ void MasterWorker::tuneGain(int idx, Loop loop, float bw_hz)
      * API redesign; until it's restored we report the operation as
      * unsupported instead of refusing to compile. */
     (void)slave; (void)bw_hz;
-    const int rc = -1;   /* synthetic failure */
+    const int rc =  motor_drive_intf_tune_bw(slave, toIntfLoop(loop),
+                                              bw_hz, &kp, &ki,
+                                              /*timeout_ms=*/2000u,
+                                              /*poll_ms=*/25u);
     const bool ok = (rc == 0);
     if (!ok){
         emit error(QStringLiteral("tune gain slave %1 loop %2 bw %3 Hz failed (rc=%4)")
@@ -725,27 +731,36 @@ void MasterWorker::captureStep(int idx, Loop loop, float amp, float ref_default)
         emit stepCaptured(idx, loop, {}, {}, 0.0f, false);
         return;
     }
-    /* 256 samples per buffer. The board fills them on its ISR (TORQUE
-     * mode at 20 kHz = 12.8 ms window, SPEED mode at 2 kHz = 128 ms);
-     * 5 s timeout is comfortable even with master-side polling latency. */
+    /* Delegate to the CiA-402 backend's step-capture op (0x2080 harness).
+     *
+     * It selects the loop board-side (writes the loop code to the tune
+     * object), arms the STEP_RP_EN capture, polls status, and does the
+     * indexed read-back of both 256-sample buffers. Crucially it writes
+     * the loop selector, so the board picks the right buffer mode:
+     *   current  -> GRAPH_STEP_RP_TORQUE : buf0 = Iq
+     *   velocity -> GRAPH_STEP_RP_SPEED  : buf0 = actual velocity
+     *   position -> app sampler          : buf0 = actual position
+     * (The earlier stub never set the loop, so the board stayed in its
+     * power-on TORQUE mode and buf0 was Iq for every loop.)
+     *
+     * ~1k expedited SDO round-trips, so the worker blocks here for a few
+     * seconds; timeout/poll are generous to cover arming + capture. */
     QVector<float> buf0(256), buf1(256);
     uint32_t sample_rate_hz = 0u;
-    /* motor_drive_intf_capture_step also went missing in the newer SDK;
-     * stub the call the same way until it's restored. */
-    (void)slave; (void)amp; (void)ref_default;
-    (void)buf0; (void)buf1; (void)sample_rate_hz;
-    const int rc = -1;   /* synthetic failure */
-    const bool ok = (rc == 0);
-    if (!ok){
+    const int32_t rc = motor_drive_intf_capture_step(
+        slave, toIntfLoop(loop), amp, ref_default,
+        buf0.data(), buf1.data(), &sample_rate_hz,
+        /*timeout_ms*/ 5000u, /*poll_ms*/ 20u);
+    if (rc != 0){
         emit error(QStringLiteral("step capture slave %1 loop %2 amp %3 failed (rc=%4)")
                        .arg(idx).arg(int(loop)).arg(amp, 0, 'f', 3).arg(rc));
         emit stepCaptured(idx, loop, {}, {}, 0.0f, false);
         return;
     }
+
     emit info(QStringLiteral("slave %1 loop %2 step amp %3 captured @ %4 Hz")
                   .arg(idx).arg(int(loop)).arg(amp, 0, 'f', 3).arg(sample_rate_hz));
-    emit stepCaptured(idx, loop, buf0, buf1,
-                       float(sample_rate_hz), true);
+    emit stepCaptured(idx, loop, buf0, buf1, float(sample_rate_hz), true);
 }
 
 /* --- Signal generator ----------------------------------------------- */
@@ -1520,6 +1535,86 @@ void MasterWorker::cancelFirmwareUpgrade()
 {
     if (!m_bootMaster){ return; }
     bootTeardown(/*emitResult=*/true, /*ok=*/false, tr("cancelled"));
+}
+
+/* ---- Run-in ("roda") ------------------------------------------------------
+ * Host-driven only: put the drive in CiA-402 velocity mode and alternate a
+ * signed velocity target between +speed (fwdSec) and -speed (revSec), until
+ * totalSec elapses (0 = until stopRunIn). setTarget updates the value the
+ * running PDO cycle already streams, so there's no extra transport. */
+void MasterWorker::startRunIn(int idx, double speedRpm,
+                              int fwdSec, int revSec, int totalSec)
+{
+    if (idx < 0 || !m_mgr){
+        emit runInStatus(false, tr("not connected / no slave selected"));
+        return;
+    }
+    m_runInIdx     = idx;
+    m_runInRadS    = std::abs(speedRpm) * (2.0 * M_PI / 60.0);   /* rpm -> rad/s */
+    m_runInFwdMs   = (fwdSec > 0 ? fwdSec : 1) * 1000;
+    m_runInRevMs   = (revSec > 0 ? revSec : 1) * 1000;
+    m_runInTotalMs = (totalSec > 0 ? totalSec : 0) * 1000;       /* 0 = until stop */
+    m_runInDir     = 0;
+
+    setMode(idx, Mode::Velocity);    /* not holding m_mutex here -> no deadlock */
+    enableOne(idx);
+
+    m_runInClock.restart();
+    m_runInTimer->start(100);        /* 10 Hz: catch the fwd/rev boundary */
+    emit runInStatus(true, tr("running…"));
+    emit info(tr("run-in: slave %1, %2 rpm, fwd %3 s / rev %4 s%5")
+                  .arg(idx).arg(speedRpm, 0, 'f', 0).arg(fwdSec).arg(revSec)
+                  .arg(totalSec > 0 ? tr(", total %1 s").arg(totalSec) : QString()));
+}
+
+void MasterWorker::onRunInTick()
+{
+    if (m_runInIdx < 0){ m_runInTimer->stop(); return; }
+    if (!m_mgr){                                   /* link dropped mid-run */
+        m_runInTimer->stop();
+        m_runInIdx = -1;
+        emit runInStatus(false, tr("disconnected"));
+        return;
+    }
+
+    const qint64 el = m_runInClock.elapsed();
+    if (m_runInTotalMs > 0 && el >= m_runInTotalMs){
+        stopRunIn();
+        return;
+    }
+
+    const qint64 period = static_cast<qint64>(m_runInFwdMs) + m_runInRevMs;
+    const qint64 phase  = (period > 0) ? (el % period) : 0;
+    const int    dir    = (phase < m_runInFwdMs) ? +1 : -1;
+
+    if (dir != m_runInDir){                         /* only on a flip */
+        m_runInDir = dir;
+        setTarget(m_runInIdx, TargetKind::Velocity,
+                  static_cast<float>(dir * m_runInRadS));
+    }
+
+    const QString phaseTxt = (dir > 0) ? tr("forward") : tr("reverse");
+    if (m_runInTotalMs > 0){
+        emit runInStatus(true, tr("%1  —  %2 s left")
+                                   .arg(phaseTxt).arg((m_runInTotalMs - el) / 1000));
+    } else {
+        emit runInStatus(true, tr("%1  —  %2 s elapsed")
+                                   .arg(phaseTxt).arg(el / 1000));
+    }
+}
+
+void MasterWorker::stopRunIn()
+{
+    if (m_runInTimer){ m_runInTimer->stop(); }
+    const int idx = m_runInIdx;
+    m_runInIdx = -1;
+    m_runInDir = 0;
+    if (idx >= 0 && m_mgr){
+        setTarget(idx, TargetKind::Velocity, 0.0f);   /* ramp target to 0 */
+        disableOne(idx);                               /* then disable output */
+    }
+    emit runInStatus(false, tr("stopped"));
+    emit info(tr("run-in stopped"));
 }
 
 void MasterWorker::bootTeardown(bool emitResult, bool ok, const QString& message)

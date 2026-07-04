@@ -80,6 +80,8 @@ add_executable(vr_mc_diagnostic
     src/PdoMappingEditor.hpp
     src/DriveConfigDialog.cpp
     src/DriveConfigDialog.hpp
+    src/RunInDialog.cpp
+    src/RunInDialog.hpp
     src/FirmwareUpgradeDialog.cpp
     src/FirmwareUpgradeDialog.hpp
     src/SlaveTableModel.cpp
