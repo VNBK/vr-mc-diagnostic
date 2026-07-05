@@ -32,6 +32,8 @@ namespace vrmc {
 
 class ConnectionDialog;
 class DriveConfigDialog;
+class FaultDiagDialog;
+class ObjectDictionaryDialog;
 class RunInDialog;
 class GainEditor;
 class JointControlPanel;
@@ -92,6 +94,11 @@ private slots:
     void onFactoryReset();
     void onUploadFirmware();
     void onConfigureDrive();
+    /** @brief Open the Fault diagnostics dialog (ROADMAP #1) bound to
+     *  the currently-selected slave. */
+    void onFaultDiag();
+    /** @brief Open the Object-Dictionary browser (ROADMAP #3). */
+    void onObjectDictionary();
     /** Show the modeless run-in ("roda") dialog (toolbar button). */
     void onShowRunIn();
     void onDeviceInfo();
@@ -226,12 +233,16 @@ private:
     QAction*          m_factoryResetAct   = nullptr;
     QAction*          m_uploadFirmwareAct = nullptr;
     QAction*          m_configureDriveAct = nullptr;
+    QAction*          m_faultDiagAct      = nullptr;
+    QAction*          m_odBrowserAct      = nullptr;
     QAction*          m_deviceInfoAct     = nullptr;
     QAction*          m_runInAct          = nullptr;   /* toolbar: run-in */
 
     /* Modeless drive-config dialog, created on demand so it can sit
      * next to the main window while the operator tweaks values. */
     DriveConfigDialog* m_driveCfgDlg = nullptr;
+    FaultDiagDialog*   m_faultDlg    = nullptr;
+    ObjectDictionaryDialog* m_odDlg  = nullptr;
     /* Modeless run-in ("roda") dialog, created on demand. */
     RunInDialog*       m_runInDlg    = nullptr;
 

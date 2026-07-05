@@ -46,12 +46,6 @@ private:
     QSpinBox*  m_zlgArb    = nullptr;
     QSpinBox*  m_zlgFd     = nullptr;
 
-    /* UART-based (shared by Feetech + Dynamixel). */
-    QGroupBox* m_uartBox   = nullptr;
-    QLineEdit* m_uartDev   = nullptr;
-    QSpinBox*  m_uartBaud  = nullptr;
-    QSpinBox*  m_dxlProto  = nullptr;
-
     /* Common. */
     QSpinBox*  m_firstId   = nullptr;
     QSpinBox*  m_count     = nullptr;

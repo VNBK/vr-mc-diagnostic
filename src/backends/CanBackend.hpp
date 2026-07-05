@@ -26,31 +26,20 @@ extern "C" {
 #include "motor_drive_interface.h"
 #include "master_mgr.h"
 
-/* UART + serial-bus drive transports. Gated at compile time so the
- * diagnostic still builds if the SDK was trimmed. */
-#include "feetech/feetech_servo.h"
-#include "hal_uart.h"
 }
-
-/* Dynamixel Protocol 2.0 driver lives in-tree (DynamixelDriver.cpp) so
- * the diagnostic always has the option in the Connect dialog, with no
- * rebuild or external SDK required. */
-#include "DynamixelDriver.hpp"
 
 namespace vrmc {
 
 /**
  * @brief Which master-side transport to instantiate.
  *
- * The first two kinds are CAN-based CiA 402 drives; the last two are
- * RS-485 servo buses that share the same master_mgr abstraction via
- * the motor_drive_*_intf adapters in vr-mc-sdk.
+ * Both kinds are CAN-based CiA 402 drives. The former Feetech / Dynamixel
+ * RS-485 servo bus options were removed — this tool targets CANopen /
+ * CiA-402 motor drives; RS-485 hobby-servo diagnostics live elsewhere.
  */
 enum class CanKind {
     Udp       = 0,   /**< UDP-multicast "CAN" (loopback sim).            */
-    Zlg       = 1,   /**< ZLG USB-CANFD adapter.                         */
-    Feetech   = 2,   /**< Feetech SMS/STS RS-485 bus.                    */
-    Dynamixel = 3    /**< ROBOTIS Dynamixel RS-485 bus.                  */
+    Zlg       = 1    /**< ZLG USB-CANFD adapter.                         */
 };
 
 struct CanConfig
@@ -67,12 +56,6 @@ struct CanConfig
     uint32_t zlgChannel  = 0;                    /**< channel index 0/1. */
     uint32_t zlgBitrate  =   500'000;            /**< arb-phase bps.     */
     uint32_t zlgFdBitrate = 2'000'000;           /**< data-phase bps.    */
-
-    /* --- UART-based transports (Feetech / Dynamixel) --- */
-    QString  uartDevice  = "/dev/ttyUSB0";       /**< Serial port path.  */
-    uint32_t uartBaud    = 1'000'000;            /**< Feetech default;   */
-                                                  /**< Dynamixel common. */
-    uint8_t  dxlProtocolVer = 2;                 /**< 1 or 2.            */
 
     /* --- Common --- */
     uint8_t  first_id       = 5;        /**< First slave id.              */
@@ -137,8 +120,7 @@ public:
 
     /** Raw hal_can endpoint (the polled channel) for an out-of-band
      *  CANopen-FD client such as the bootloader's USDO transport
-     *  (boot_output_cofd_create). Valid only on UDP / ZLG transports;
-     *  null for Feetech / Dynamixel. The caller must serialise its use
+     *  (boot_output_cofd_create). The caller must serialise its use
      *  with the normal PDO/SDO traffic — the worker pauses the PDO cycle
      *  for the duration of a firmware upgrade. */
     void* canHandle() const { return reinterpret_cast<void*>(m_canPdo); }
@@ -262,13 +244,6 @@ private:
     hal_can_t*                     m_canPdo = nullptr;
     co_fd_usdo_client_t*           m_client = nullptr;
     can_fd_pdo_t*                  m_pdo    = nullptr;
-
-    /* Serial bus transports. These don't use hal_can at all — they're
-     * UART-based RS-485 servo chains. Only populated when @c m_kind is
-     * Feetech or Dynamixel. */
-    hal_uart_t*                    m_uart        = nullptr;
-    feetech_servo_t                m_feetechBus  = {};
-    DynamixelBus*                  m_dxlBus      = nullptr;
 
     std::vector<Slot*>             m_slots;
 };

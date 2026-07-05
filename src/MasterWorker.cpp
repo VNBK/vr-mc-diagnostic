@@ -183,8 +183,8 @@ void MasterWorker::onTick()
     /* SDO refresh strategy: if PDO is alive, skip the per-tick SDO poll
      * entirely — telemetry comes from cached TPDO frames. Fire a
      * housekeeping refresh every second so name / id / fallback state
-     * stay current for slaves that briefly drop PDO. Without PDO
-     * (Feetech, Dynamixel) keep the original per-tick refresh. */
+     * stay current for slaves that briefly drop PDO. Without PDO,
+     * fall back to the original per-tick refresh. */
     const bool pdo = m_can.hasPdo();
     ++m_refreshTick;
     const int houseKeepEvery = std::max(1, m_hz);  /* 1 Hz */

@@ -5,6 +5,8 @@
 
 #include "ConnectionDialog.hpp"
 #include "DriveConfigDialog.hpp"
+#include "FaultDiagDialog.hpp"
+#include "ObjectDictionaryDialog.hpp"
 #include "RunInDialog.hpp"
 
 #include <QComboBox>
@@ -40,6 +42,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QProcess>
+#include <QScrollArea>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
@@ -156,9 +159,30 @@ void MainWindow::buildUi()
      * their own dock widgets so the operator can float or dock them
      * beside the table. */
     m_leftTabs = new QTabWidget;
-    m_leftTabs->addTab(m_control, tr("Control"));
-    m_leftTabs->addTab(m_gains,   tr("Gains"));
-    m_leftTabs->addTab(m_gen,     tr("Signal gen"));
+    /* Each panel is a vertical stack of QGroupBoxes with an addStretch()
+     * at the bottom — natural sizeHint is the sum of every group box,
+     * which routinely exceeds the visible height when the operator
+     * shrinks the main window (or drags the horizontal splitter up).
+     * Wrap each tab page in a QScrollArea with widgetResizable=true so:
+     *   - large windows: the panel stretches to fill the tab area
+     *     (widgetResizable propagates the tab-area geometry to the child)
+     *   - small windows: a vertical scroll bar appears and the panel
+     *     keeps its natural width — no widgets get clipped, no groupbox
+     *     gets squeezed to unreadable height.
+     * Horizontal scroll stays off so the tab bar doesn't get pushed off
+     * screen on narrow window sizes. */
+    auto scrollWrap = [](QWidget* inner){
+        auto* sa = new QScrollArea();
+        sa->setWidget(inner);
+        sa->setWidgetResizable(true);
+        sa->setFrameShape(QFrame::NoFrame);
+        sa->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sa->setVerticalScrollBarPolicy  (Qt::ScrollBarAsNeeded);
+        return sa;
+    };
+    m_leftTabs->addTab(scrollWrap(m_control), tr("Control"));
+    m_leftTabs->addTab(scrollWrap(m_gains),   tr("Gains"));
+    m_leftTabs->addTab(scrollWrap(m_gen),     tr("Signal gen"));
 
     /* Edit button on the profile view → reuse the editor menu handler. */
     connect(m_profileView, &MotorProfileView::editRequested,
@@ -484,12 +508,30 @@ void MainWindow::buildMenus()
     m_deviceInfoAct = new QAction(
         style->standardIcon(QStyle::SP_MessageBoxInformation),
         tr("Device &Info"), this);
+    /* ROADMAP #1 + #3 — Fault diagnostics + Object-Dictionary browser.
+     * Both dialogs are per-slave; they open bound to the picker-bar
+     * selection just like Configure Drive does. */
+    m_faultDiagAct = new QAction(
+        style->standardIcon(QStyle::SP_MessageBoxWarning),
+        tr("&Fault diagnostics…"), this);
+    m_faultDiagAct->setToolTip(tr("Decode 0x1001 error register + "
+        "0x603F current code + 0x1003 fault history for the selected slave."));
+    m_odBrowserAct = new QAction(
+        style->standardIcon(QStyle::SP_FileDialogListView),
+        tr("&Object Dictionary browser…"), this);
+    m_odBrowserAct->setToolTip(tr("Named OD tree with per-entry read "
+        "and a live watch list."));
     connect(m_factoryResetAct,   &QAction::triggered, this, &MainWindow::onFactoryReset);
     connect(m_uploadFirmwareAct, &QAction::triggered, this, &MainWindow::onUploadFirmware);
     connect(m_configureDriveAct, &QAction::triggered, this, &MainWindow::onConfigureDrive);
     connect(m_deviceInfoAct,     &QAction::triggered, this, &MainWindow::onDeviceInfo);
+    connect(m_faultDiagAct,      &QAction::triggered, this, &MainWindow::onFaultDiag);
+    connect(m_odBrowserAct,      &QAction::triggered, this, &MainWindow::onObjectDictionary);
     driveMenu->addAction(m_configureDriveAct);
     driveMenu->addAction(m_deviceInfoAct);
+    driveMenu->addSeparator();
+    driveMenu->addAction(m_faultDiagAct);
+    driveMenu->addAction(m_odBrowserAct);
     driveMenu->addSeparator();
     driveMenu->addAction(m_factoryResetAct);
     driveMenu->addSeparator();
@@ -1323,8 +1365,8 @@ void MainWindow::showDocPanel(const QString& name)
     } else if (name.startsWith(QLatin1String("connect"))){
         /* Non-modal invocation is awkward; open the standard modal
          * ConnectionDialog, then let the screenshot pipeline grab it.
-         * Support "connect:feetech" / "connect:dynamixel" etc. so the
-         * docs pipeline can capture each transport's field set. */
+         * Support "connect:zlg" / "connect:udp" so the docs pipeline
+         * can capture each transport's field set. */
         auto* dlg = new ConnectionDialog(this);
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         dlg->setModal(false);
@@ -1456,6 +1498,82 @@ void MainWindow::onConfigureDrive()
     m_driveCfgDlg->activateWindow();
     /* Kick off a read so the form reflects what's on the drive. */
     emit m_driveCfgDlg->readRequested(idx);
+}
+
+
+void MainWindow::onFaultDiag()
+{
+    /* Same slave-selection pattern as onConfigureDrive: use the picker
+     * bar's active row (fall back to first row / prompt on empty). */
+    int idx = -1;
+    QString name;
+    const auto rows = m_table && m_table->selectionModel()
+                          ? m_table->selectionModel()->selectedRows()
+                          : QModelIndexList{};
+    if (!rows.isEmpty()){
+        const int row = rows.first().row();
+        idx  = m_model->index(row, SlaveTableModel::ColIdx).data().toInt();
+        name = m_model->index(row, SlaveTableModel::ColName).data().toString();
+    }
+    if (idx < 0){
+        QMessageBox::information(this, tr("Fault diagnostics"),
+            tr("Select a slave in the table first."));
+        return;
+    }
+    if (!m_faultDlg){
+        m_faultDlg = new FaultDiagDialog(this);
+        connect(m_faultDlg, &FaultDiagDialog::sdoReadRequested,
+                m_worker,   &MasterWorker::customSdoRead,
+                Qt::QueuedConnection);
+        connect(m_faultDlg, &FaultDiagDialog::sdoWriteRequested,
+                m_worker,   &MasterWorker::customSdoWrite,
+                Qt::QueuedConnection);
+        /* customSdoDone is a fan-out signal (DriveConfigDialog listens
+         * too). The dialog's filter-by-(odIdx, sub) design lets both
+         * live off the same signal without cross-talk. */
+        connect(m_worker,   &MasterWorker::customSdoDone,
+                m_faultDlg, &FaultDiagDialog::onCustomSdoDone);
+    }
+    m_faultDlg->setSlaveContext(idx, name);
+    m_faultDlg->show();
+    m_faultDlg->raise();
+    m_faultDlg->activateWindow();
+    m_faultDlg->refresh();
+}
+
+
+void MainWindow::onObjectDictionary()
+{
+    int idx = -1;
+    QString name;
+    const auto rows = m_table && m_table->selectionModel()
+                          ? m_table->selectionModel()->selectedRows()
+                          : QModelIndexList{};
+    if (!rows.isEmpty()){
+        const int row = rows.first().row();
+        idx  = m_model->index(row, SlaveTableModel::ColIdx).data().toInt();
+        name = m_model->index(row, SlaveTableModel::ColName).data().toString();
+    }
+    if (idx < 0){
+        QMessageBox::information(this, tr("Object Dictionary browser"),
+            tr("Select a slave in the table first."));
+        return;
+    }
+    if (!m_odDlg){
+        m_odDlg = new ObjectDictionaryDialog(this);
+        connect(m_odDlg,  &ObjectDictionaryDialog::sdoReadRequested,
+                m_worker, &MasterWorker::customSdoRead,
+                Qt::QueuedConnection);
+        connect(m_odDlg,  &ObjectDictionaryDialog::sdoWriteRequested,
+                m_worker, &MasterWorker::customSdoWrite,
+                Qt::QueuedConnection);
+        connect(m_worker, &MasterWorker::customSdoDone,
+                m_odDlg,  &ObjectDictionaryDialog::onCustomSdoDone);
+    }
+    m_odDlg->setSlaveContext(idx, name);
+    m_odDlg->show();
+    m_odDlg->raise();
+    m_odDlg->activateWindow();
 }
 
 void MainWindow::onDeviceInfo()

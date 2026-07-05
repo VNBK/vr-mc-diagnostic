@@ -41,12 +41,11 @@ set(BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_APP      OFF CACHE BOOL "" FORCE)
 
-# Feetech SMS/STS backend ships with the SDK (no external deps) — always
-# on so the transport menu has it out of the box. Dynamixel uses an
-# in-tree Protocol 2.0 driver (src/backends/DynamixelDriver.cpp) — no
-# ROBOTIS SDK dependency, always available at runtime.
-set(BUILD_FEETECH   ON  CACHE BOOL "" FORCE)
-set(BUILD_DYNAMIXEL OFF CACHE BOOL "" FORCE)   # SDK adapter unused now
+# Feetech / Dynamixel RS-485 servo backends were removed — this
+# diagnostic targets CANopen / CiA-402 motor drives (UDP loopback or
+# ZLG USB-CANFD only).
+set(BUILD_FEETECH   OFF CACHE BOOL "" FORCE)
+set(BUILD_DYNAMIXEL OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(${VR_MC_SDK_DIR} ${CMAKE_BINARY_DIR}/_vr_mc_sdk EXCLUDE_FROM_ALL)
 
@@ -80,6 +79,10 @@ add_executable(vr_mc_diagnostic
     src/PdoMappingEditor.hpp
     src/DriveConfigDialog.cpp
     src/DriveConfigDialog.hpp
+    src/FaultDiagDialog.cpp
+    src/FaultDiagDialog.hpp
+    src/ObjectDictionaryDialog.cpp
+    src/ObjectDictionaryDialog.hpp
     src/RunInDialog.cpp
     src/RunInDialog.hpp
     src/FirmwareUpgradeDialog.cpp
@@ -101,8 +104,6 @@ add_executable(vr_mc_diagnostic
     src/LogDock.hpp
     src/backends/CanBackend.cpp
     src/backends/CanBackend.hpp
-    src/backends/DynamixelDriver.cpp
-    src/backends/DynamixelDriver.hpp
     src/TestRunner/TestRunnerWindow.cpp
     src/TestRunner/TestRunnerWindow.hpp
     src/TestRunner/YamlBridge.cpp
@@ -142,8 +143,6 @@ target_link_libraries(vr_mc_diagnostic PRIVATE
     cia402_master
     can_stack
     platform_linux
-    motor_drive_feetech_intf
-    feetech_servo
     vr_bootmaster          # boot_master + boot_slave + file-input + cofd-output
     yaml-cpp               # TestRunner schema-v2 IO
 )

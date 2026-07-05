@@ -155,10 +155,17 @@ private:
      *  so unit labelling stays consistent. */
     void syncTargetKindToMode();
 
+public:
     /** @brief Decode a CiA-402 error_code into "0xCODE name". Empty
      *  for code == 0. Covers the common DS-402 §8.2 codes; falls back
-     *  to "0xCODE (manufacturer)" for unknown codes. */
+     *  to "0xCODE (manufacturer)" for unknown codes.
+     *
+     *  Kept public so the Fault-diagnostics dialog can reuse the same
+     *  table; a hoisted-to-free-function refactor makes sense once a
+     *  third caller shows up. */
     static QString decodeErrorCode(uint16_t code);
+
+private:
 
     /** @brief Recompute the slider's range from the currently-selected
      *  target kind so the operator can sweep useful values (e.g. ±π

@@ -2,10 +2,9 @@
 
 Qt6 diagnostic / tuning desktop tool for the motor-control stack in
 [`vr-mc-sdk`](../vr-mc-sdk). Talks to one or more CiA 402 drive nodes
-through the in-tree `master_mgr` + `motor_drive_interface` APIs and any
-of the supported transports. Default Connect dialog opens on
-**ZLG USB-CANFD**; UDP loopback + RS-485 serial buses are also
-available.
+through the in-tree `master_mgr` + `motor_drive_interface` APIs. Default
+Connect dialog opens on **ZLG USB-CANFD**; a UDP-multicast loopback
+transport is available for the SDK's simulator.
 
 ```
 ┌─ Picker bar ────────────────────────────────────────────────────────┐
@@ -19,8 +18,8 @@ available.
 
 ## Features
 
-- **Connection dialog** — UDP multicast (loopback sim), ZLG USB-CANFD,
-  Feetech, Dynamixel. ESI + SRDF pickers. Sensible defaults.
+- **Connection dialog** — UDP multicast (loopback sim) or ZLG USB-CANFD.
+  ESI + SRDF pickers. Sensible defaults.
 - **Slave picker bar** — single-row combobox + live state / `q` / `ω`
   / `τ` / `err` strip; replaces a wide multi-column table for the
   common single-slave-at-a-time workflow.
@@ -183,8 +182,6 @@ Pick the matching backend in the Connection dialog (default = ZLG):
 |---|---|---|
 | **ZLG USB-CANFD** | channel 0, **500 k arb / 2 M data** | Real CAN-FD; matches `motor_drive_master` SDK default. Vendor `libcontrolcanfd.so` ships with the build |
 | UDP multicast | `239.192.0.42:23400` | Loopback against `vrmc_sim` or any CiA-402 sim on the same group |
-| Feetech RS-485 | `/dev/ttyUSB0` @ 1 M | Add user to the `dialout` group |
-| Dynamixel RS-485 | `/dev/ttyUSB0` @ 1 M | Protocol 2.0, choose at Connect |
 
 ## Architecture & cycle times
 

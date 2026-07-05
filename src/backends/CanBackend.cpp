@@ -18,13 +18,7 @@ extern "C" {
 #include "hal_can.h"
 #include "hal_can_udp.h"
 #include "hal_can_zlg.h"               /* SDK platform_linux: multi-endpoint */
-#include "hal_uart.h"
-#include "hal_uart_linux.h"
-#include "motor_drive_feetech_intf.h"
-#include "feetech/feetech_servo.h"
 }
-
-#include "DynamixelDriver.hpp"
 
 namespace vrmc {
 
@@ -161,10 +155,9 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
         return false;
     }
 
-    /* Build the requested transport. CAN paths share the rest of the
-     * bring-up (SDO client + CiA 402 per-slave), so we fall through to
-     * the common branch below once m_canCli is non-null. UART paths
-     * (Feetech / Dynamixel) register slaves directly and return early. */
+    /* Build the requested transport. Both CAN paths share the rest of
+     * the bring-up (SDO client + CiA 402 per-slave), so we fall through
+     * to the common branch below once m_canCli is non-null. */
     m_kind = cfg.kind;
     switch (cfg.kind){
     case CanKind::Udp: {
@@ -205,101 +198,6 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
             return false;
         }
         break;
-    }
-    case CanKind::Feetech: {
-        const QByteArray dev = cfg.uartDevice.toUtf8();
-        m_uart = hal_uart_linux_create(dev.constData());
-        if (!m_uart){
-            if (err){
-                *err = QStringLiteral("hal_uart_linux_create failed for %1")
-                           .arg(cfg.uartDevice);
-            }
-            close();
-            return false;
-        }
-        hal_uart_config_t ucfg{};
-        ucfg.baudrate     = cfg.uartBaud;
-        ucfg.word_bits    = 8;
-        ucfg.parity       = HAL_UART_PARITY_NONE;
-        ucfg.stop_bits    = HAL_UART_STOP_1;
-        ucfg.flow_control = false;
-        if (hal_uart_init(m_uart, &ucfg) != 0){
-            if (err){ *err = QStringLiteral("hal_uart_init failed"); }
-            close();
-            return false;
-        }
-        feetech_servo_bind(&m_feetechBus, m_uart);
-        /* Register one motor_drive_feetech_intf per servo id. */
-        for (uint8_t i = 0; i < cfg.count; ++i){
-            auto* slot    = new Slot();
-            slot->node_id = uint8_t(cfg.first_id + i);
-            std::snprintf(slot->name, sizeof(slot->name),
-                          "feetech-%u", unsigned(slot->node_id));
-            motor_drive_feetech_intf_cfg_t icfg{};
-            icfg.bus                 = &m_feetechBus;
-            icfg.id                  = slot->node_id;
-            icfg.counts_per_rad      = 4096.0f / (2.0f * 3.14159265f);
-            icfg.steps_per_rad_per_s = 0.0f;
-            icfg.A_per_Nm            = 0.0f;
-            icfg.acc_default         = 50;
-            icfg.speed_default       = 1000;
-            icfg.bringup_mode        = MOTOR_INTF_MODE_POSITION;
-            icfg.name                = slot->name;
-            slot->intf = motor_drive_feetech_intf_create(&icfg);
-            if (!slot->intf){
-                if (err){ *err = QStringLiteral("feetech intf create failed"); }
-                delete slot; close(); return false;
-            }
-            if (master_mgr_add_slave(mgr, slot->intf) < 0){
-                if (err){ *err = QStringLiteral("master_mgr_add_slave failed"); }
-                motor_drive_intf_free(slot->intf);
-                delete slot; close(); return false;
-            }
-            m_slots.push_back(slot);
-        }
-        return true;   /* UART path: no SDO / PDO bring-up needed. */
-    }
-    case CanKind::Dynamixel: {
-        /* In-tree Dynamixel Protocol 2.0 driver (DynamixelDriver.cpp).
-         * Opens the UART, runs the CRC/framing/stuffing itself — no
-         * ROBOTIS SDK dependency, so this just works at runtime with no
-         * compile flags. cfg.dxlProtocolVer is accepted for forward
-         * compatibility but only 2.0 is implemented today. */
-        std::string dxlErr;
-        m_dxlBus = DynamixelBus::open(cfg.uartDevice.toStdString(),
-                                       cfg.uartBaud, &dxlErr);
-        if (!m_dxlBus || !m_dxlBus->ok()){
-            if (err){
-                *err = QStringLiteral("Dynamixel bus open failed: %1")
-                           .arg(QString::fromStdString(dxlErr));
-            }
-            close();
-            return false;
-        }
-        for (uint8_t i = 0; i < cfg.count; ++i){
-            auto* slot    = new Slot();
-            slot->node_id = uint8_t(cfg.first_id + i);
-            std::snprintf(slot->name, sizeof(slot->name),
-                          "dxl-%u", unsigned(slot->node_id));
-            DynamixelIntfCfg icfg{};
-            icfg.bus          = m_dxlBus;
-            icfg.id           = slot->node_id;
-            icfg.A_per_Nm     = 0.0f;
-            icfg.bringup_mode = MOTOR_INTF_MODE_POSITION;
-            icfg.name         = slot->name;
-            slot->intf = makeDynamixelIntf(icfg);
-            if (!slot->intf){
-                if (err){ *err = QStringLiteral("dynamixel intf create failed"); }
-                delete slot; close(); return false;
-            }
-            if (master_mgr_add_slave(mgr, slot->intf) < 0){
-                if (err){ *err = QStringLiteral("master_mgr_add_slave failed"); }
-                motor_drive_intf_free(slot->intf);
-                delete slot; close(); return false;
-            }
-            m_slots.push_back(slot);
-        }
-        return true;
     }
     }
 
@@ -369,10 +267,10 @@ bool CanBackend::open(master_mgr_t* mgr, const CanConfig& cfg, QString* err)
      * worker poll the cache at its UI tick rate. PDO uses its own
      * hal_can endpoint so it doesn't steal the USDO client's RX cb. */
     if (!m_canPdo){
-        /* Only reachable for UART transports (Feetech/Dynamixel), which
-         * don't allocate a CAN endpoint and don't have PDOs. CAN paths
-         * (UDP / ZLG) both create m_canPdo above, so they fall through
-         * to the per-slave RPDO subscription below. */
+        /* Defensive early-return: both UDP and ZLG paths set m_canPdo
+         * during transport bring-up. Reaching here means the transport
+         * open path forgot to allocate one (bug). Skipping PDO is
+         * safer than dereferencing null; SDO still works. */
         return true;
     }
     m_pdo = can_fd_pdo_create(m_canPdo, /*od=*/nullptr);
@@ -506,26 +404,11 @@ void CanBackend::close()
         switch (m_kind){
         case CanKind::Udp: hal_can_udp_destroy(*h); break;
         case CanKind::Zlg: hal_can_zlg_destroy(*h); break;
-        case CanKind::Feetech:
-        case CanKind::Dynamixel:
-            /* UART transports never allocate hal_can handles. */
-            break;
         }
         *h = nullptr;
     };
     destroyHalCan(&m_canPdo);
     destroyHalCan(&m_canCli);
-
-    /* UART teardown. feetech_servo_bind stores a raw pointer; unbind so
-     * the servo helper doesn't hold on to stale memory. */
-    if (m_kind == CanKind::Feetech){
-        feetech_servo_unbind(&m_feetechBus);
-    }
-    if (m_dxlBus){ delete m_dxlBus; m_dxlBus = nullptr; }
-    if (m_uart){
-        hal_uart_linux_destroy(m_uart);
-        m_uart = nullptr;
-    }
 }
 
 void CanBackend::pump()
@@ -548,8 +431,6 @@ void CanBackend::pump()
     }
     if (m_pdo)   { can_fd_pdo_process(m_pdo, /*dt_us=*/1000); }
     if (m_client){ co_fd_usdo_client_process(m_client, 1); }
-    /* Feetech / Dynamixel: no async RX to pump — every servo op is a
-     * synchronous request/reply done inside motor_drive_*_intf. */
 }
 
 void CanBackend::pumpForBoot()
@@ -571,13 +452,6 @@ int CanBackend::writePdoMapping(int slotIdx, bool isTpdo,
                                 const std::vector<PdoMapEntry>& entries,
                                 QString* err)
 {
-    if (m_kind != CanKind::Udp && m_kind != CanKind::Zlg){
-        if (err){
-            *err = QStringLiteral("PDO mapping is CiA 402-only; "
-                                  "current transport is Feetech/Dynamixel");
-        }
-        return -1;
-    }
     if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= m_slots.size()){
         if (err){ *err = QStringLiteral("invalid slave index"); }
         return -1;
