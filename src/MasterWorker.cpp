@@ -290,10 +290,10 @@ static constexpr uint16_t kCwShutdown         = 0x0006;   /* Disable on next wal
 static constexpr uint16_t kCwQuickStop        = 0x0002;   /* Controlled decel + brake */
 static constexpr uint16_t kCwFaultReset       = 0x0080;   /* Rising edge of bit 7     */
 
-void MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
+bool MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
 {
     QMutexLocker lock(&m_mutex);
-    if (!m_mgr){ return; }
+    if (!m_mgr){ return false; }
     /* Park the cached cycle controlword at 0x0000 (Disable Voltage) for
      * the SDO bringup walk so the cycle's RPDOs don't fight the SDO
      * writes done by cia402_master_bringup. After the walk completes,
@@ -302,6 +302,7 @@ void MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
     if (master_mgr_bringup_one(m_mgr, idx, timeoutMs) != 0){
         emit error(QStringLiteral("bringup slave %1 failed").arg(idx));
         emit controlwordCached(idx, 0);
+        return false;
     } else {
         emit info(QStringLiteral("bringup slave %1 ok").arg(idx));
         m_can.setCycleControlword(static_cast<uint32_t>(idx), kCwEnableOperation);
@@ -320,6 +321,7 @@ void MasterWorker::bringupOne(int idx, uint32_t timeoutMs)
                       .arg(idx).arg(double(m_ratedA), 0, 'g', 4));
         }
     }
+    return true;
 }
 
 void MasterWorker::enableOne(int idx)
@@ -464,6 +466,7 @@ void MasterWorker::setMode(int idx, Mode mode)
                            (mode == Mode::Torque)   ? "TORQUE"   : "NONE";
         emit info(QStringLiteral("slave %1 mode → %2 (0x6060 = %3)")
                       .arg(idx).arg(name).arg(int(toIntfMode(mode))));
+        emit modeChanged(idx, mode);
     }
 }
 
@@ -1556,8 +1559,20 @@ void MasterWorker::startRunIn(int idx, double speedRpm,
     m_runInTotalMs = (totalSec > 0 ? totalSec : 0) * 1000;       /* 0 = until stop */
     m_runInDir     = 0;
 
+    /* Auto-bringup so the operator doesn't have to arm the drive first.
+     * Select velocity mode BEFORE the walk so it's applied by the time the
+     * drive reaches OPERATION_ENABLED, then run the FULL CiA-402 bringup
+     * walk (bringupOne) rather than a one-shot enableOne -- the latter only
+     * works from SWITCH_ON_DISABLED, which is why a manual Bringup was
+     * needed. Bail (and keep the dialog in its idle Start state) if the
+     * drive never reaches OPERATION_ENABLED, so we never sit "running"
+     * with a dead motor / an unusable Stop. */
     setMode(idx, Mode::Velocity);    /* not holding m_mutex here -> no deadlock */
-    enableOne(idx);
+    if (!bringupOne(idx, 2000)){
+        m_runInIdx = -1;
+        emit runInStatus(false, tr("bring-up failed — check drive state / faults"));
+        return;
+    }
 
     m_runInClock.restart();
     m_runInTimer->start(100);        /* 10 Hz: catch the fwd/rev boundary */

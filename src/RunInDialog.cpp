@@ -101,6 +101,7 @@ void RunInDialog::setRunning(bool running, const QString& status)
 {
     m_running = running;
     m_button->setText(running ? tr("Stop") : tr("Start"));
+    m_button->setEnabled(true);   /* Start/Stop toggle is always clickable */
     m_unitRadS->setEnabled(!running);
     m_speed   ->setEnabled(!running);
     m_fwdSec  ->setEnabled(!running);

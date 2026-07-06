@@ -184,7 +184,11 @@ public slots:
     void refreshOnce();            /**< explicit poke; normally auto-periodic */
     void setRefreshHz(int hz);     /**< default 20 Hz */
 
-    void bringupOne (int idx, uint32_t timeoutMs);
+    /** Walk the CiA-402 state machine up to OPERATION_ENABLED (with a
+     *  timeout). Returns true only if the drive actually reached it —
+     *  callers that need to know (e.g. run-in) gate on the result; the
+     *  queued signal/slot callers simply ignore it. */
+    bool bringupOne (int idx, uint32_t timeoutMs);
     void enableOne  (int idx);
     void disableOne (int idx);
     /** Quick Stop: write controlword 0x0002 (clear bit 2 = trigger
@@ -346,6 +350,11 @@ signals:
      *  JointControlPanel mirrors this in its readout strip so the
      *  operator sees what the master is actually telling each slave. */
     void controlwordCached (int idx, uint16_t cw);
+
+    /** Mode of operation (0x6060) changed on the drive — emitted whenever
+     *  the worker sets it (manual mode combo, or auto during run-in) so UI
+     *  surfaces like the Control panel can follow the live mode. */
+    void modeChanged (int idx, vrmc::Mode mode);
 
     /** Custom-SDO operation completed. @p valueDecoded is the read-back
      *  bytes formatted as a little-endian unsigned hex string (empty

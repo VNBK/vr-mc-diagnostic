@@ -45,6 +45,11 @@ public slots:
      *  MasterWorker after arm/disarm/quick-stop. */
     void onControlwordCached(int idx, uint16_t cw);
 
+    /** Follow a mode change made elsewhere (e.g. run-in auto-switches to
+     *  velocity). Updates the Mode combo — which in turn re-syncs the
+     *  target kind + setpoint units — without re-issuing a mode request. */
+    void onModeChanged(int idx, vrmc::Mode mode);
+
 signals:
     /* Routed by MainWindow to MasterWorker via QueuedConnection. */
     void bringupRequested  (int idx, uint32_t timeoutMs);

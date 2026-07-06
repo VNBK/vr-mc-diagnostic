@@ -13,13 +13,28 @@ appendix section "G. Changelog").
 ## 1.0.2 — 2026-07-03
 
 ### Fixbug
-- NONE
+- Auto fit with screen resolution.
+
+### Refactor
+- Remove Dynamixel, Feetech protocol in the backend. Only CanBus and UDP (for demo).
 
 ### Upgrade firmware
-- Add reboot SDO to jump to bootloader when upgrading process. 
+- Support upgrade firmware from Bootloader.
+- Support upgrade firmware with online device. Auto reboot device to execute upgrading.
 
 ### TestRunner
 - Support TestRunner with basic testcase.
+
+### Run-in (Roda)
+- Support Run-in process. They is installed to speed mode.
+
+### Object Dictionary.
+- Support Object Dictionary browser.
+- Export/Import with XML format.
+- Template is at the ~/.config/VinRobotics/
+
+### Fault/Emergency Diagnostic
+- Support Fault/Emergency diagnostic
 ---
 
 ## 1.0.1 — 2026-06-23

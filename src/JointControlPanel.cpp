@@ -533,6 +533,18 @@ void JointControlPanel::onControlwordCached(int idx, uint16_t cw)
     refreshReadout();
 }
 
+void JointControlPanel::onModeChanged(int idx, Mode mode)
+{
+    if (idx != m_idx || !m_modeCombo){ return; }
+    const int mi = m_modeCombo->findData(int(mode));
+    if (mi < 0 || mi == m_modeCombo->currentIndex()){ return; }
+    /* Setting the combo fires its currentIndexChanged handler, which
+     * runs syncTargetKindToMode() + refreshReadout() — the same path as
+     * a manual pick, so the target kind and setpoint units follow. It
+     * does NOT emit modeRequested, so there's no loop back to the worker. */
+    m_modeCombo->setCurrentIndex(mi);
+}
+
 void JointControlPanel::emitTarget()
 {
     sendTarget(m_valueSpin->value());

@@ -788,6 +788,11 @@ void MainWindow::wireWorker()
     connect(m_worker, &MasterWorker::controlwordCached,
             m_control, &JointControlPanel::onControlwordCached);
 
+    /* Mirror live mode changes (manual, or run-in's auto velocity switch)
+     * into the Control panel's Mode combo + setpoint units. */
+    connect(m_worker, &MasterWorker::modeChanged,
+            m_control, &JointControlPanel::onModeChanged);
+
     /* GainEditor -> worker + worker -> GainEditor. */
     connect(m_gains,  &GainEditor::readGainRequested,
             m_worker, &MasterWorker::readGain,   Qt::QueuedConnection);
