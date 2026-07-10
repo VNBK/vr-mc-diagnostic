@@ -208,6 +208,7 @@ void DriveConfigDialog::buildAppTab(QWidget* host)
         auto* form = new QFormLayout(idBox);
         m_mfNodeId = makeSpin(1, 127, 5);
         form->addRow(tr("Node ID (0x2000:01)"), m_mfNodeId);
+        addGroupSave(form, idBox, CFG_GRP_IDENTITY, 0x04);
     }
     root->addWidget(idBox);
 
@@ -236,6 +237,7 @@ void DriveConfigDialog::buildAppTab(QWidget* host)
         auto* row = new QHBoxLayout;
         row->addWidget(m_zeroEncBtn);
         row->addStretch(1);
+        row->addWidget(makeGroupSave(mechBox, CFG_GRP_MECHANICAL, 0x04));
         form->addRow(QString(), row);
     }
     root->addWidget(mechBox);
@@ -244,22 +246,52 @@ void DriveConfigDialog::buildAppTab(QWidget* host)
     auto* sensBox = new QGroupBox(tr("Sensor calibration"), host);
     {
         auto* form = new QFormLayout(sensBox);
-        m_mfHallOffset = new QDoubleSpinBox(sensBox);
-        m_mfHallOffset->setRange(-7.0, 7.0);
-        m_mfHallOffset->setDecimals(5);
-        m_mfHallOffset->setValue(0.0);
-        m_mfHallOffset->setAlignment(Qt::AlignRight);
-        m_mfHallOffset->setSuffix(tr(" rad"));
-        form->addRow(tr("Hall offset (0x2060)"), m_mfHallOffset);
+        /* 0x2060:1 -- commutation (electrical align) offset, generic across
+         * the sensor variants (Hall / abs-encoder / resolver). */
+        m_mfCommutOffset = new QDoubleSpinBox(sensBox);
+        m_mfCommutOffset->setRange(-7.0, 7.0);
+        m_mfCommutOffset->setDecimals(5);
+        m_mfCommutOffset->setValue(0.0);
+        m_mfCommutOffset->setAlignment(Qt::AlignRight);
+        m_mfCommutOffset->setSuffix(tr(" rad"));
+        form->addRow(tr("Commutation offset (0x2060:1)"), m_mfCommutOffset);
+
+        /* 0x2060:2 -- position offset. Writes straight to the TMAG sin
+         * offset app-param (applied to the live sensor + persisted). */
+        m_mfPosOffset = new QDoubleSpinBox(sensBox);
+        m_mfPosOffset->setRange(-1e6, 1e6);
+        m_mfPosOffset->setDecimals(3);
+        m_mfPosOffset->setValue(0.0);
+        m_mfPosOffset->setAlignment(Qt::AlignRight);
+        form->addRow(tr("Position offset (0x2060:2, TMAG sin)"), m_mfPosOffset);
+
+        /* 0x2060:3..:5 -- the rest of the TMAG sin/cos calibration
+         * (sin gain, cos offset, cos gain). Written directly like :2;
+         * the board applies the whole channel to the live sensor. */
+        auto mkTmag = [&](const QString& label, int decimals){
+            auto* sb = new QDoubleSpinBox(sensBox);
+            sb->setRange(-1e6, 1e6);
+            sb->setDecimals(decimals);
+            sb->setValue(0.0);
+            sb->setAlignment(Qt::AlignRight);
+            form->addRow(label, sb);
+            return sb;
+        };
+        m_mfTmagSinGain = mkTmag(tr("Position offset_0 (0x2060:3, TMAG sin gain)"),  5);
+        m_mfTmagCosOff  = mkTmag(tr("Position offset_1 (0x2060:4, TMAG cos offset)"),3);
+        m_mfTmagCosGain = mkTmag(tr("Position offset_2 (0x2060:5, TMAG cos gain)"),  5);
 
         auto* tmagNote = new QLabel(
-            tr("TMAG6180 sin/cos cal is run as a one-shot via "
-               "0x2031:01 = 3 (Custom SDO tab), not edited per-field here."),
+            tr("TMAG6180 sin/cos full cal: 0x2031:01 = 2 (begin) → spin the "
+               "motor ≥1 electrical rev → 0x2031:01 = 3 (finalize). The "
+               "sin/cos offset+gain can also be written directly via "
+               "0x2060:2..:5 above."),
             sensBox);
         tmagNote->setWordWrap(true);
         tmagNote->setStyleSheet(QStringLiteral(
             "QLabel { color: #9aa; padding: 2px 4px; }"));
         form->addRow(QString(), tmagNote);
+        addGroupSave(form, sensBox, CFG_GRP_SENSOR_CALIB, 0x04);
     }
     root->addWidget(sensBox);
 
@@ -297,6 +329,7 @@ void DriveConfigDialog::buildMotorTab(QWidget* host)
         form->addRow(tr("Pos limit max (0x607D:2)"), m_posMax);
         form->addRow(tr("Max motor speed (0x6080)"), m_maxSpeed);
         form->addRow(tr("Max torque (0x6072)"),      m_maxTorque);
+        addGroupSave(form, limBox, CFG_GRP_MOTION_LIMITS, 0x05);
     }
     root->addWidget(limBox);
 
@@ -321,6 +354,7 @@ void DriveConfigDialog::buildMotorTab(QWidget* host)
         auto* row = new QHBoxLayout;
         row->addWidget(m_zeroTorqueBtn);
         row->addStretch(1);
+        row->addWidget(makeGroupSave(rateBox, CFG_GRP_RATED, 0x05));
         form->addRow(QString(), row);
 
         m_torqueState = new QLabel(tr("Torque: —"), rateBox);
@@ -331,63 +365,83 @@ void DriveConfigDialog::buildMotorTab(QWidget* host)
     }
     root->addWidget(rateBox);
 
-    /* --- Current sensor calibration --- */
+    /* --- Current sensor calibration (two columns: offsets | gains) --- */
     auto* csBox = new QGroupBox(tr("Current sensor calibration"), host);
     {
-        auto makeCS = [csBox](double lo, double hi, double v, int dec){
-            auto* s = new QDoubleSpinBox(csBox);
-            s->setRange(lo, hi);
-            s->setDecimals(dec);
-            s->setValue(v);
-            s->setAlignment(Qt::AlignRight);
-            return s;
-        };
-        auto* form = new QFormLayout(csBox);
-        m_mfCurOffA  = makeCS(-1e6, 1e6, 0.0, 4);
-        m_mfCurOffB  = makeCS(-1e6, 1e6, 0.0, 4);
-        m_mfCurOffC  = makeCS(-1e6, 1e6, 0.0, 4);
-        m_mfCurGainA = makeCS(0.0, 1e6, 1.0, 4);
-        m_mfCurGainB = makeCS(0.0, 1e6, 1.0, 4);
-        m_mfCurGainC = makeCS(0.0, 1e6, 1.0, 4);
-        form->addRow(tr("Current offset A (0x2040:1)"), m_mfCurOffA);
-        form->addRow(tr("Current offset B (0x2040:2)"), m_mfCurOffB);
-        form->addRow(tr("Current offset C (0x2040:3)"), m_mfCurOffC);
-        form->addRow(tr("Current gain A (0x2041:1)"),   m_mfCurGainA);
-        form->addRow(tr("Current gain B (0x2041:2)"),   m_mfCurGainB);
-        form->addRow(tr("Current gain C (0x2041:3)"),   m_mfCurGainC);
+        auto* boxLay = new QVBoxLayout(csBox);
+        auto* cols   = new QHBoxLayout;
+        auto* left   = new QFormLayout;
+        auto* right  = new QFormLayout;
+        left ->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        right->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        m_mfCurOffA  = makeDSpin(-1e6, 1e6, 4);
+        m_mfCurOffB  = makeDSpin(-1e6, 1e6, 4);
+        m_mfCurOffC  = makeDSpin(-1e6, 1e6, 4);
+        m_mfCurGainA = makeDSpin(0.0, 1e6, 4); m_mfCurGainA->setValue(1.0);
+        m_mfCurGainB = makeDSpin(0.0, 1e6, 4); m_mfCurGainB->setValue(1.0);
+        m_mfCurGainC = makeDSpin(0.0, 1e6, 4); m_mfCurGainC->setValue(1.0);
+        left ->addRow(tr("Offset A (0x2040:1)"), m_mfCurOffA);
+        left ->addRow(tr("Offset B (0x2040:2)"), m_mfCurOffB);
+        left ->addRow(tr("Offset C (0x2040:3)"), m_mfCurOffC);
+        right->addRow(tr("Gain A (0x2041:1)"),   m_mfCurGainA);
+        right->addRow(tr("Gain B (0x2041:2)"),   m_mfCurGainB);
+        right->addRow(tr("Gain C (0x2041:3)"),   m_mfCurGainC);
+        cols->addLayout(left);
+        cols->addLayout(right);
+        boxLay->addLayout(cols);
+        auto* saveRow = new QHBoxLayout;
+        saveRow->addStretch(1);
+        saveRow->addWidget(makeGroupSave(csBox, CFG_GRP_CUR_SENSOR, 0x05));
+        boxLay->addLayout(saveRow);
     }
     root->addWidget(csBox);
 
-    /* --- Fault thresholds --- */
+    /* --- Fault thresholds (two columns) --- 0 disables that detector. */
     auto* faultBox = new QGroupBox(tr("Fault thresholds"), host);
     {
-        auto* form = new QFormLayout(faultBox);
-        m_stallCurrent = makeSpin(0, 1'000'000, 0, tr("mA"));
-        m_stallTime    = makeSpin(0, 60000,     0, tr("ms"));
-        form->addRow(tr("Stall current (0x2050:1)"), m_stallCurrent);
-        form->addRow(tr("Stall time (0x2050:2)"),    m_stallTime);
+        auto* boxLay = new QVBoxLayout(faultBox);
+        auto* cols   = new QHBoxLayout;
+        auto* left   = new QFormLayout;
+        auto* right  = new QFormLayout;
+        left ->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        right->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        m_stallCurrent  = makeSpin(0, 1'000'000, 0, tr("mA"));
+        m_stallTime     = makeSpin(0, 60000,     0, tr("ms"));
+        m_stallVel      = makeDSpin(0, 1e5, 3, tr("rad/s"));
+        m_overCurrent   = makeDSpin(0, 1e4, 3, tr("A"));
+        m_overLoad      = makeDSpin(0, 1e4, 3, tr("A"));
+        m_overLoadTime  = makeDSpin(0, 60,  3, tr("s"));
+        m_overVoltage   = makeDSpin(0, 1e3, 2, tr("V"));
+        m_underVoltage  = makeDSpin(0, 1e3, 2, tr("V"));
+        m_underVoltTime = makeDSpin(0, 60,  3, tr("s"));
+        m_lossPhaseMin  = makeDSpin(0, 1e4, 3, tr("A"));
+        m_lossPhaseTime = makeDSpin(0, 60,  3, tr("s"));
+        m_unbalance     = makeDSpin(0, 1e4, 3, tr("A"));
+        /* left = stall + over-current/-load; right = voltage + loss/unbalance */
+        left ->addRow(tr("Stall current (0x2050:1)"),  m_stallCurrent);
+        left ->addRow(tr("Stall time (0x2050:2)"),     m_stallTime);
+        left ->addRow(tr("Stall vel gate (0x2050:3)"), m_stallVel);
+        left ->addRow(tr("Over-current (0x2050:4)"),   m_overCurrent);
+        left ->addRow(tr("Over-load (0x2050:5)"),      m_overLoad);
+        left ->addRow(tr("Over-load time (0x2050:6)"), m_overLoadTime);
+        right->addRow(tr("Over-voltage (0x2050:7)"),    m_overVoltage);
+        right->addRow(tr("Under-voltage (0x2050:8)"),   m_underVoltage);
+        right->addRow(tr("Under-volt time (0x2050:9)"), m_underVoltTime);
+        right->addRow(tr("Loss-phase min (0x2050:10)"), m_lossPhaseMin);
+        right->addRow(tr("Loss-phase time (0x2050:11)"),m_lossPhaseTime);
+        right->addRow(tr("Unbalance (0x2050:12)"),      m_unbalance);
+        cols->addLayout(left);
+        cols->addLayout(right);
+        boxLay->addLayout(cols);
+        auto* saveRow = new QHBoxLayout;
+        saveRow->addStretch(1);
+        saveRow->addWidget(makeGroupSave(faultBox, CFG_GRP_FAULT, 0x05));
+        boxLay->addLayout(saveRow);
     }
-    root->addWidget(faultBox);
-
-    auto* xref = new QLabel(
-        tr("Related editors that also write to this blob:<br>"
-           "• <b>Motor Profile</b> editor → writes 0x2070 (Rs, Ls, Kt, J, …)<br>"
-           "• <b>Gains</b> tab → writes 0x60F6 / 0x60F9 / 0x60FB"),
-        host);
-    xref->setWordWrap(true);
-    xref->setStyleSheet(QStringLiteral("QLabel { color: #9aa; padding: 4px; }"));
-    root->addWidget(xref);
-
-    auto* hint = new QLabel(
-        tr("💾 Persisted in <b>motor_drive_params</b> blob (code-flash). "
-           "Save via Storage tab → <i>Save Motor (:05)</i> or "
-           "<i>Save All (:01)</i>, or just click <b>Save</b> below."),
-        host);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral(
-        "QLabel { color: #9ad8a8; padding: 4px; border-top: 1px solid #333; }"));
-    root->addWidget(hint);
-    root->addStretch(1);
+    /* faultBox takes a vertical stretch so it gets the freed room (the
+     * cross-ref / persistence hint labels were removed to fit the 12
+     * fault-threshold spinboxes). */
+    root->addWidget(faultBox, 1);
 }
 
 /* ============================================================ Runtime tab
@@ -424,6 +478,7 @@ void DriveConfigDialog::buildRuntimeTab(QWidget* host)
         auto* row = new QHBoxLayout;
         row->addWidget(m_startHomingBtn);
         row->addStretch(1);
+        row->addWidget(makeGroupSave(homeBox, CFG_GRP_HOMING, 0x00));
         form->addRow(QString(), row);
 
         m_homingState = new QLabel(tr("Homing: —"), homeBox);
@@ -446,6 +501,7 @@ void DriveConfigDialog::buildRuntimeTab(QWidget* host)
         form->addRow(tr("Profile acceleration (0x6083)"),   m_profileAccel);
         form->addRow(tr("Profile deceleration (0x6084)"),   m_profileDecel);
         form->addRow(tr("Quickstop deceleration (0x6085)"), m_quickstopDecel);
+        addGroupSave(form, motBox, CFG_GRP_MOTION_PROFILE, 0x00);
     }
     root->addWidget(motBox);
 
@@ -457,6 +513,7 @@ void DriveConfigDialog::buildRuntimeTab(QWidget* host)
         m_followingMs    = makeSpin(0, 60000, 100, tr("ms"));
         form->addRow(tr("Max following error (0x6065)"), m_followingError);
         form->addRow(tr("Following error time (0x6066)"), m_followingMs);
+        addGroupSave(form, feBox, CFG_GRP_FOLLOWING_ERR, 0x00);
     }
     root->addWidget(feBox);
 
@@ -787,6 +844,16 @@ void DriveConfigDialog::setConfig(const DriveConfig& cfg)
     if (m_ratedCurrent) m_ratedCurrent->setValue(rated_a);
     if (m_stallCurrent) m_stallCurrent->setValue(int(cfg.stall_current));
     if (m_stallTime)    m_stallTime   ->setValue(int(cfg.stall_time));
+    if (m_stallVel)      m_stallVel     ->setValue(double(cfg.stall_velocity));
+    if (m_overCurrent)   m_overCurrent  ->setValue(double(cfg.over_current));
+    if (m_overLoad)      m_overLoad     ->setValue(double(cfg.over_load));
+    if (m_overLoadTime)  m_overLoadTime ->setValue(double(cfg.over_load_time));
+    if (m_overVoltage)   m_overVoltage  ->setValue(double(cfg.over_voltage));
+    if (m_underVoltage)  m_underVoltage ->setValue(double(cfg.under_voltage));
+    if (m_underVoltTime) m_underVoltTime->setValue(double(cfg.under_voltage_time));
+    if (m_lossPhaseMin)  m_lossPhaseMin ->setValue(double(cfg.loss_phase_min));
+    if (m_lossPhaseTime) m_lossPhaseTime->setValue(double(cfg.loss_phase_time));
+    if (m_unbalance)     m_unbalance    ->setValue(double(cfg.unbalance));
 
     /* Manufacturer-range fields. */
     if (m_mfNodeId)     m_mfNodeId    ->setValue(int(cfg.node_id));
@@ -796,7 +863,11 @@ void DriveConfigDialog::setConfig(const DriveConfig& cfg)
     if (m_mfCurGainA)   m_mfCurGainA  ->setValue(double(cfg.current_gain_a));
     if (m_mfCurGainB)   m_mfCurGainB  ->setValue(double(cfg.current_gain_b));
     if (m_mfCurGainC)   m_mfCurGainC  ->setValue(double(cfg.current_gain_c));
-    if (m_mfHallOffset) m_mfHallOffset->setValue(double(cfg.hall_offset));
+    if (m_mfCommutOffset) m_mfCommutOffset->setValue(double(cfg.commut_offset));
+    if (m_mfPosOffset)    m_mfPosOffset   ->setValue(double(cfg.pos_offset));
+    if (m_mfTmagSinGain)  m_mfTmagSinGain ->setValue(double(cfg.tmag_sin_gain));
+    if (m_mfTmagCosOff)   m_mfTmagCosOff  ->setValue(double(cfg.tmag_cos_offset));
+    if (m_mfTmagCosGain)  m_mfTmagCosGain ->setValue(double(cfg.tmag_cos_gain));
 }
 
 DriveConfig DriveConfigDialog::config() const
@@ -837,6 +908,16 @@ DriveConfig DriveConfigDialog::config() const
     if (m_ratedCurrent) c.rated_current = uint32_t(lround(rated_a * 1000.0)); /* A -> mA */
     if (m_stallCurrent) c.stall_current = uint32_t(m_stallCurrent->value());
     if (m_stallTime)    c.stall_time    = uint32_t(m_stallTime->value());
+    if (m_stallVel)      c.stall_velocity     = float(m_stallVel->value());
+    if (m_overCurrent)   c.over_current       = float(m_overCurrent->value());
+    if (m_overLoad)      c.over_load          = float(m_overLoad->value());
+    if (m_overLoadTime)  c.over_load_time     = float(m_overLoadTime->value());
+    if (m_overVoltage)   c.over_voltage       = float(m_overVoltage->value());
+    if (m_underVoltage)  c.under_voltage      = float(m_underVoltage->value());
+    if (m_underVoltTime) c.under_voltage_time = float(m_underVoltTime->value());
+    if (m_lossPhaseMin)  c.loss_phase_min     = float(m_lossPhaseMin->value());
+    if (m_lossPhaseTime) c.loss_phase_time    = float(m_lossPhaseTime->value());
+    if (m_unbalance)     c.unbalance          = float(m_unbalance->value());
 
     /* Manufacturer-range fields (0x20xx), all RW. */
     if (m_mfNodeId)     c.node_id          = uint8_t (m_mfNodeId->value());
@@ -846,7 +927,11 @@ DriveConfig DriveConfigDialog::config() const
     if (m_mfCurGainA)   c.current_gain_a   = float (m_mfCurGainA->value());
     if (m_mfCurGainB)   c.current_gain_b   = float (m_mfCurGainB->value());
     if (m_mfCurGainC)   c.current_gain_c   = float (m_mfCurGainC->value());
-    if (m_mfHallOffset) c.hall_offset      = float (m_mfHallOffset->value());
+    if (m_mfCommutOffset) c.commut_offset   = float (m_mfCommutOffset->value());
+    if (m_mfPosOffset)    c.pos_offset       = float (m_mfPosOffset->value());
+    if (m_mfTmagSinGain)  c.tmag_sin_gain    = float (m_mfTmagSinGain->value());
+    if (m_mfTmagCosOff)   c.tmag_cos_offset  = float (m_mfTmagCosOff->value());
+    if (m_mfTmagCosGain)  c.tmag_cos_gain    = float (m_mfTmagCosGain->value());
     return c;
 }
 
@@ -854,6 +939,53 @@ void DriveConfigDialog::onReadClicked()
 {
     if (m_slaveIdx < 0){ return; }
     emit readRequested(m_slaveIdx);
+}
+
+/* 4-byte LE "save" magic that guards 0x1010 store commands. */
+static QByteArray saveMagicPayload()
+{
+    QByteArray payload(4, '\0');
+    constexpr uint32_t kMagicSave = 0x65766173u;   /* "save" LE on wire */
+    payload[0] = char( kMagicSave        & 0xFFu);
+    payload[1] = char((kMagicSave >> 8 ) & 0xFFu);
+    payload[2] = char((kMagicSave >> 16) & 0xFFu);
+    payload[3] = char((kMagicSave >> 24) & 0xFFu);
+    return payload;
+}
+
+QPushButton* DriveConfigDialog::makeGroupSave(QWidget* box, int group,
+                                              uint8_t blobSub)
+{
+    auto* btn = new QPushButton(tr("Save"), box);
+    btn->setToolTip(blobSub
+        ? tr("Write only this group's OD entries, then persist its flash "
+             "blob (0x1010:%1).").arg(blobSub, 2, 16, QChar('0'))
+        : tr("Write only this group's OD entries live (runtime — not "
+             "persisted, resets on reboot)."));
+    connect(btn, &QPushButton::clicked, this, [this, group, blobSub]{
+        if (m_slaveIdx < 0){ return; }
+        emit writeGroupRequested(m_slaveIdx, config(), group);
+        if (blobSub != 0){
+            emit storageCommandRequested(m_slaveIdx, 0x1010, blobSub,
+                                         saveMagicPayload());
+        }
+        if (m_storageStatus){
+            m_storageStatus->setText(blobSub
+                ? tr("Save group: writing OD + 0x1010:%1 …")
+                      .arg(blobSub, 2, 16, QChar('0'))
+                : tr("Save group: writing OD (runtime, not persisted) …"));
+        }
+    });
+    return btn;
+}
+
+void DriveConfigDialog::addGroupSave(QFormLayout* form, QWidget* box,
+                                     int group, uint8_t blobSub)
+{
+    auto* row = new QHBoxLayout;
+    row->addStretch(1);
+    row->addWidget(makeGroupSave(box, group, blobSub));
+    form->addRow(QString(), row);
 }
 
 void DriveConfigDialog::onSaveClicked()
@@ -869,13 +1001,7 @@ void DriveConfigDialog::onSaveClicked()
     /* 2) Flash commit: fire 0x1010:01 = "save" so the just-written
      *    values land in flash and survive reboot. Same magic value the
      *    Storage tab's "Save All" button uses. */
-    QByteArray payload(4, '\0');
-    constexpr uint32_t kMagicSave = 0x65766173u;   /* "save" LE on wire */
-    payload[0] = char( kMagicSave        & 0xFFu);
-    payload[1] = char((kMagicSave >> 8 ) & 0xFFu);
-    payload[2] = char((kMagicSave >> 16) & 0xFFu);
-    payload[3] = char((kMagicSave >> 24) & 0xFFu);
-    emit storageCommandRequested(m_slaveIdx, 0x1010, 0x01, payload);
+    emit storageCommandRequested(m_slaveIdx, 0x1010, 0x01, saveMagicPayload());
 
     if (m_storageStatus){
         m_storageStatus->setText(tr("Save: writing OD + 0x1010:01 …"));

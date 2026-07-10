@@ -863,10 +863,21 @@ static QVector<DriveField> driveFields(DriveConfig& c)
          * telemetry graph (streamed in the TPDO). */
         fld(0x2050, 1, c.stall_current),
         fld(0x2050, 2, c.stall_time),
+        fld(0x2050, 3, c.stall_velocity),
+        fld(0x2050, 4, c.over_current),
+        fld(0x2050, 5, c.over_load),
+        fld(0x2050, 6, c.over_load_time),
+        fld(0x2050, 7, c.over_voltage),
+        fld(0x2050, 8, c.under_voltage),
+        fld(0x2050, 9, c.under_voltage_time),
+        fld(0x2050, 10, c.loss_phase_min),
+        fld(0x2050, 11, c.loss_phase_time),
+        fld(0x2050, 12, c.unbalance),
 
         /* Manufacturer range (0x20xx): node-id + current-sensor cal
-         * (offset 0x2040 + gain 0x2041, RW) + Hall offset (0x2060) +
-         * motor-profile electrical record (0x2070). */
+         * (offset 0x2040 + gain 0x2041, RW) + Angle offsets (0x2060:
+         * :1 commutation, :2..:5 TMAG sin/cos offset+gain) + motor-profile
+         * record (0x2070). */
         fld(0x2000, 1, c.node_id),
         fld(0x2040, 1, c.current_offset_a),
         fld(0x2040, 2, c.current_offset_b),
@@ -874,8 +885,32 @@ static QVector<DriveField> driveFields(DriveConfig& c)
         fld(0x2041, 1, c.current_gain_a),
         fld(0x2041, 2, c.current_gain_b),
         fld(0x2041, 3, c.current_gain_c),
-        fld(0x2060, 0, c.hall_offset),
+        fld(0x2060, 1, c.commut_offset),
+        fld(0x2060, 2, c.pos_offset),
+        fld(0x2060, 3, c.tmag_sin_gain),
+        fld(0x2060, 4, c.tmag_cos_offset),
+        fld(0x2060, 5, c.tmag_cos_gain),
     };
+}
+
+/* Does OD entry @p idx belong to CfgGroup @p group? Mirrors the dialog's
+ * group boxes (each OD index maps to exactly one group). */
+static bool fieldInGroup(uint16_t idx, int group)
+{
+    switch (group){
+    case CFG_GRP_IDENTITY:       return idx == 0x2000;
+    case CFG_GRP_MECHANICAL:     return idx == 0x607C || idx == 0x608F || idx == 0x6091;
+    case CFG_GRP_SENSOR_CALIB:   return idx == 0x2060;
+    case CFG_GRP_MOTION_LIMITS:  return idx == 0x607D || idx == 0x6080 || idx == 0x6072;
+    case CFG_GRP_RATED:          return idx == 0x6075 || idx == 0x6076;
+    case CFG_GRP_CUR_SENSOR:     return idx == 0x2040 || idx == 0x2041;
+    case CFG_GRP_FAULT:          return idx == 0x2050;
+    case CFG_GRP_HOMING:         return idx == 0x6098 || idx == 0x6099 || idx == 0x609A;
+    case CFG_GRP_MOTION_PROFILE: return idx == 0x6081 || idx == 0x6083 ||
+                                        idx == 0x6084 || idx == 0x6085;
+    case CFG_GRP_FOLLOWING_ERR:  return idx == 0x6065 || idx == 0x6066;
+    default:                     return false;
+    }
 }
 
 }  // namespace
@@ -974,6 +1009,39 @@ void MasterWorker::writeDriveConfig(int idx, DriveConfig cfg)
                        .arg(failures.size())
                        .arg(fields.size()));
         emit driveConfigWritten(idx, false, msg);
+    }
+}
+
+void MasterWorker::writeGroup(int idx, DriveConfig cfg, int group)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_mgr){
+        emit driveConfigWritten(idx, false, QStringLiteral("not connected"));
+        return;
+    }
+    auto fields = driveFields(cfg);
+    QStringList failures;
+    int written = 0, total = 0;
+    for (const auto& f : fields){
+        if (!fieldInGroup(f.idx, group)){ continue; }
+        ++total;
+        if (f.readonly){ continue; }   /* e.g. 0x6076 rated torque */
+        QString err;
+        if (m_can.writeSdo(idx, f.idx, f.sub, f.ptr, f.len, &err) != 0){
+            failures << err;
+        } else {
+            ++written;
+        }
+    }
+    if (failures.isEmpty()){
+        emit info(QStringLiteral("drive config: slave %1 group %2 written (%3 fields)")
+                      .arg(idx).arg(group).arg(written));
+        emit driveConfigWritten(idx, true, QString());
+    } else {
+        emit error(QStringLiteral("drive config write: slave %1 group %2 — "
+                                  "%3 of %4 fields failed")
+                       .arg(idx).arg(group).arg(failures.size()).arg(total));
+        emit driveConfigWritten(idx, false, failures.join(QStringLiteral("\n")));
     }
 }
 

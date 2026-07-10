@@ -39,7 +39,11 @@ transport is available for the SDK's simulator.
   Motion profile, Protection, Encoder, Manufacturer, and a Custom-SDO
   free-form poke tab. Fault-thresholds expanded into 10 sub-fields
   (over-current, over-load, current loss phase, unbalance, stall,
-  over/under-voltage, over-temperature, …).
+  over/under-voltage, over-temperature, …). Sensor calibration exposes
+  the **Angle-offsets record `0x2060`** for direct writes:
+  `:1` commutation offset (rad, electrical align — Hall / abs-encoder /
+  resolver) and `:2` position offset (writes the TMAG sin offset;
+  applied to the live sensor + persisted on the board).
 - **Telemetry chart** — single chart with grouped show/hide
   checkboxes (Position / Velocity / Torque / Tracking / Electrical).
 - **Record to CSV** — toolbar **Record** button prompts for a path,
@@ -101,7 +105,10 @@ profile (`0x2070`). Markers: ✅ = board primitive exists (orchestrate now),
 - **Phase 1 — Current-sense offset calibration** (drive disabled). Zero
   the phase-current ADC offsets so every later current reading is
   trustworthy. Board: **`0x2030:1 = 1`**, poll done. ✅ Optional analog-
-  encoder sin/cos min-max calibration (TMAG6180). ✅
+  encoder sin/cos min-max calibration (TMAG6180): **`0x2031:1 = 2`**
+  (begin) → spin ≥1 electrical rev → **`0x2031:1 = 3`** (finalize +
+  persist). ✅ The single sin offset can also be written directly via
+  **`0x2060:2`** (Configure-drive → Sensor calibration). ✅
 - **Phase 2 — Electrical parameter identification** (the real "auto-ID").
   Currently entered **by hand from the name-plate**; true measurement
   needs firmware ⚠️:
@@ -115,7 +122,8 @@ profile (`0x2070`). Markers: ✅ = board primitive exists (orchestrate now),
   (inject d-axis current → rotor locks to d → encoder reading = offset),
   store `alignment_offset_rad`; check direction/polarity and pole-pair
   sanity; seek index/home. Board: **`0x2031:1 = 5`** (3FL_2 align), poll
-  **0x2031:2**. ✅
+  **0x2031:2**. ✅ The resulting commutation offset can also be read /
+  written directly via **`0x2060:1`** (rad). ✅
 - **Phase 4 — Current loop: seed + verify.** Model-based seed from
   profile: `0x2080:01=0` (current), `:02=<bw>`, `:03=1` (trigger),
   poll `:04==0`, read **Kp/Ki = 0x60F6:01/02**; then verify with a step

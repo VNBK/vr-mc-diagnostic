@@ -19,6 +19,7 @@
 class QComboBox;
 class QDialogButtonBox;
 class QDoubleSpinBox;
+class QFormLayout;
 class QLabel;
 class QPushButton;
 class QSpinBox;
@@ -41,6 +42,10 @@ signals:
     void readRequested  (int idx);
     /** User pressed Apply / OK. Forward to worker::writeDriveConfig. */
     void applyRequested (int idx, vrmc::DriveConfig cfg);
+    /** User pressed a per-group Save. Forward to worker::writeGroup (writes
+     *  only that group's OD entries); the dialog issues the flash-persist
+     *  separately via @ref storageCommandRequested. */
+    void writeGroupRequested (int idx, vrmc::DriveConfig cfg, int group);
     /** Commissioning one-shots wired to the worker of the same names. */
     void startHomingRequested (int idx);
     void zeroEncoderRequested (int idx);
@@ -105,6 +110,15 @@ private:
     void buildRuntimeTab      (QWidget* host);
     void buildCustomTab       (QWidget* host);
     void buildStorageTab      (QWidget* host);
+    /** Append a right-aligned "Save this group" button to @p form. On click
+     *  it emits writeGroupRequested(group) and, when @p blobSub != 0, a
+     *  storageCommandRequested(0x1010:@p blobSub) to persist that blob
+     *  (0=runtime group, no flash persist). */
+    void addGroupSave(QFormLayout* form, QWidget* box,
+                      int group, uint8_t blobSub);
+    /** Create + wire a group "Save" button (no row added) so callers can
+     *  place it inline — e.g. next to an existing action button. */
+    QPushButton* makeGroupSave(QWidget* box, int group, uint8_t blobSub);
     /** Walk every tab page and set its minimum size to the largest
      *  sizeHint across all tabs. Forces QTabWidget::sizeHint to
      *  reflect the widest tab's footprint, so adjustSize() can pick a
@@ -145,6 +159,16 @@ private:
     QSpinBox*       m_gearShaft      = nullptr;   /**< 0x6091:2 shaft revs   */
     QSpinBox*       m_stallCurrent   = nullptr;   /**< 0x2050:1 mA           */
     QSpinBox*       m_stallTime      = nullptr;   /**< 0x2050:2 ms           */
+    QDoubleSpinBox* m_stallVel       = nullptr;   /**< 0x2050:3 rad/s        */
+    QDoubleSpinBox* m_overCurrent    = nullptr;   /**< 0x2050:4 A            */
+    QDoubleSpinBox* m_overLoad       = nullptr;   /**< 0x2050:5 A            */
+    QDoubleSpinBox* m_overLoadTime   = nullptr;   /**< 0x2050:6 s            */
+    QDoubleSpinBox* m_overVoltage    = nullptr;   /**< 0x2050:7 V            */
+    QDoubleSpinBox* m_underVoltage   = nullptr;   /**< 0x2050:8 V            */
+    QDoubleSpinBox* m_underVoltTime  = nullptr;   /**< 0x2050:9 s            */
+    QDoubleSpinBox* m_lossPhaseMin   = nullptr;   /**< 0x2050:10 A           */
+    QDoubleSpinBox* m_lossPhaseTime  = nullptr;   /**< 0x2050:11 s           */
+    QDoubleSpinBox* m_unbalance      = nullptr;   /**< 0x2050:12 A           */
 
     /* Counts/rev (0x608F) cached from the last read; drives SI scaling.
      * Falls back to 16384 until the drive reports it. */
@@ -182,7 +206,11 @@ private:
     QDoubleSpinBox* m_mfCurGainA     = nullptr;   /**< 0x2041:01 (RW)      */
     QDoubleSpinBox* m_mfCurGainB     = nullptr;   /**< 0x2041:02 (RW)      */
     QDoubleSpinBox* m_mfCurGainC     = nullptr;   /**< 0x2041:03 (RW)      */
-    QDoubleSpinBox* m_mfHallOffset   = nullptr;   /**< 0x2060 rad          */
+    QDoubleSpinBox* m_mfCommutOffset = nullptr;   /**< 0x2060:1 rad          */
+    QDoubleSpinBox* m_mfPosOffset    = nullptr;   /**< 0x2060:2 TMAG sin off */
+    QDoubleSpinBox* m_mfTmagSinGain  = nullptr;   /**< 0x2060:3 TMAG sin gain*/
+    QDoubleSpinBox* m_mfTmagCosOff   = nullptr;   /**< 0x2060:4 TMAG cos off */
+    QDoubleSpinBox* m_mfTmagCosGain  = nullptr;   /**< 0x2060:5 TMAG cos gain*/
 
     /* Storage tab widgets. Six buttons + a status line; pair of OD index +
      * subindex baked into the button via QPushButton::property. */

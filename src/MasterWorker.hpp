@@ -82,6 +82,17 @@ enum class Loop {
  *  The indices below are canonical (see CiA 402 §7) — real drives expose
  *  them; the in-tree simulator only answers a subset so reads/writes
  *  against it often abort. */
+
+/** Field groups within DriveConfig, matching the Configure-drive dialog's
+ *  group boxes. @ref MasterWorker::writeGroup commits just one group's OD
+ *  entries. App groups persist to the app_params blob (0x1010:04), Motor
+ *  groups to motor_drive_params (0x1010:05), Runtime groups not at all. */
+enum CfgGroup {
+    CFG_GRP_IDENTITY = 1, CFG_GRP_MECHANICAL, CFG_GRP_SENSOR_CALIB,   /* app   */
+    CFG_GRP_MOTION_LIMITS, CFG_GRP_RATED, CFG_GRP_CUR_SENSOR, CFG_GRP_FAULT, /* motor */
+    CFG_GRP_HOMING, CFG_GRP_MOTION_PROFILE, CFG_GRP_FOLLOWING_ERR,    /* runtime */
+};
+
 struct DriveConfig
 {
     /* Homing (0x6098 / 0x6099 / 0x607C / 0x609A). */
@@ -119,9 +130,20 @@ struct DriveConfig
     uint32_t gear_ratio_shaft_revs = 1;  /**< 0x6091:2                     */
 
     /* Protection (vendor 0x2050 record). Stall current crossing held for
-     * stall_time trips a fault. */
-    uint32_t stall_current      = 0;     /**< 0x2050:1 mA  */
-    uint32_t stall_time         = 0;     /**< 0x2050:2 ms  */
+     * stall_time trips a fault. :3..:12 are the rest of the motor fault_cfg
+     * (REAL32, native units) exposed for direct configuration. */
+    uint32_t stall_current      = 0;     /**< 0x2050:1 mA    */
+    uint32_t stall_time         = 0;     /**< 0x2050:2 ms    */
+    float    stall_velocity     = 0.0f;  /**< 0x2050:3 rad/s */
+    float    over_current       = 0.0f;  /**< 0x2050:4 A     */
+    float    over_load          = 0.0f;  /**< 0x2050:5 A     */
+    float    over_load_time     = 0.0f;  /**< 0x2050:6 s     */
+    float    over_voltage       = 0.0f;  /**< 0x2050:7 V     */
+    float    under_voltage      = 0.0f;  /**< 0x2050:8 V     */
+    float    under_voltage_time = 0.0f;  /**< 0x2050:9 s     */
+    float    loss_phase_min     = 0.0f;  /**< 0x2050:10 A    */
+    float    loss_phase_time    = 0.0f;  /**< 0x2050:11 s    */
+    float    unbalance          = 0.0f;  /**< 0x2050:12 A    */
 
     /* ---- Manufacturer-range parameters (0x20xx) -------------------- */
     /* Node ID (vendor-defined; 0x2000:01, uint8). Change with care —
@@ -137,8 +159,14 @@ struct DriveConfig
     float    current_gain_b     = 1.0f;  /**< 0x2041:2 */
     float    current_gain_c     = 1.0f;  /**< 0x2041:3 */
 
-    /* Hall commutation alignment offset (0x2060, rad). */
-    float    hall_offset        = 0.0f;  /**< 0x2060 */
+    /* Angle-sensor offsets (0x2060 record).
+     *   :1 commutation alignment offset (rad, generic across sensors).
+     *   :2..:5 TMAG sin/cos calibration. */
+    float    commut_offset      = 0.0f;  /**< 0x2060:1 (rad) */
+    float    pos_offset         = 0.0f;  /**< 0x2060:2 (TMAG sin offset) */
+    float    tmag_sin_gain      = 1.0f;  /**< 0x2060:3 */
+    float    tmag_cos_offset    = 0.0f;  /**< 0x2060:4 */
+    float    tmag_cos_gain      = 1.0f;  /**< 0x2060:5 */
     /* Motor profile electrical record (0x2070) is written by the Motor
      * Profile editor (writeMotorProfile), not this batch. */
 };
@@ -259,6 +287,9 @@ public slots:
      * they'll queue behind the periodic refresh. */
     void readDriveConfig (int idx);
     void writeDriveConfig(int idx, vrmc::DriveConfig cfg);
+    /** Write only the OD entries belonging to @p group (see @ref CfgGroup);
+     *  the persist step is issued separately by the dialog. */
+    void writeGroup      (int idx, vrmc::DriveConfig cfg, int group);
 
     /** Write a motor profile to the drive: electrical record 0x2070:1..8
      *  + rated torque (0x6076) + rated current (0x6075). Fired by the

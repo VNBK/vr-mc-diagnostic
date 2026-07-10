@@ -1464,6 +1464,9 @@ void MainWindow::onConfigureDrive()
         connect(m_driveCfgDlg, &DriveConfigDialog::applyRequested,
                 m_worker,      &MasterWorker::writeDriveConfig,
                 Qt::QueuedConnection);
+        connect(m_driveCfgDlg, &DriveConfigDialog::writeGroupRequested,
+                m_worker,      &MasterWorker::writeGroup,
+                Qt::QueuedConnection);
         connect(m_driveCfgDlg, &DriveConfigDialog::startHomingRequested,
                 m_worker,      &MasterWorker::startHoming,
                 Qt::QueuedConnection);
