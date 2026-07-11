@@ -1,6 +1,9 @@
 #include "JointControlPanel.hpp"
+#include "ScenarioEditorDialog.hpp"
 
+#include <QBrush>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -18,6 +21,7 @@
 #include <QSaveFile>
 #include <QSlider>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <cmath>
 
@@ -86,6 +90,14 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     m_targetCombo->addItem(tr("Position (rad)"),   int(TargetKind::Position));
     m_targetCombo->addItem(tr("Velocity (rad/s)"), int(TargetKind::Velocity));
     m_targetCombo->addItem(tr("Torque (Nm)"),      int(TargetKind::Torque));
+    /* The target kind is driven by the Mode combo — @ref syncTargetKindToMode
+     * flips this to match whenever Mode changes. Disable so the operator
+     * can't get the two out of sync by clicking here; the current value
+     * still shows so the setpoint units next to the spinbox make sense. */
+    m_targetCombo->setEnabled(false);
+    m_targetCombo->setToolTip(tr("Follows the Mode selector above — "
+        "target kind is derived from mode so the setpoint units stay "
+        "consistent."));
 
     m_valueSpin = new QDoubleSpinBox(this);
     m_valueSpin->setRange(-10000.0, 10000.0);
@@ -164,20 +176,34 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     auto* tgtBox = new QGroupBox(tr("Setpoint"), this);
     {
         auto* l = new QGridLayout(tgtBox);
+
+        /* Row 0 — single mode-aware spinbox. The target combo is left
+         * visible (disabled) so the operator sees WHICH mode's units
+         * the spinbox is currently in, but can't switch kind by
+         * clicking it — mode changes only through the Mode combo
+         * above, which drives kind 1:1 via syncTargetKindToMode. */
         l->addWidget(m_targetCombo, 0, 0);
         l->addWidget(m_valueSpin,   0, 1);
         l->addWidget(m_sendBtn,     0, 2);
         connect(m_sendBtn, &QPushButton::clicked, this, &JointControlPanel::emitTarget);
 
-        /* Slider row spans 3 columns under the combo+spinbox+Send. */
+        /* Slider row spans 3 columns under the spinboxes+Send. */
         auto* sliderRow = new QHBoxLayout;
         sliderRow->addWidget(m_setpointSlider, /*stretch=*/1);
         sliderRow->addWidget(m_liveStream);
         l->addLayout(sliderRow, 1, 0, 1, 3);
 
+        /* Align "Presets:" and "Jog:" first-column labels so the first
+         * button after each label falls on the same x. Same fixed
+         * minimum width means the QHBoxLayouts start their next widget
+         * at the same offset. */
+        constexpr int kLabelColPx = 64;
+
         /* Preset row sits under the slider. */
         auto* presetsRow = new QHBoxLayout;
-        presetsRow->addWidget(new QLabel(tr("Presets:"), tgtBox));
+        auto* presetsLbl = new QLabel(tr("Presets:"), tgtBox);
+        presetsLbl->setMinimumWidth(kLabelColPx);
+        presetsRow->addWidget(presetsLbl);
         presetsRow->addWidget(m_preset0);
         presetsRow->addWidget(m_presetQp);
         presetsRow->addWidget(m_presetQn);
@@ -187,7 +213,9 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
 
         /* Jog row underneath. */
         auto* jogRow = new QHBoxLayout;
-        jogRow->addWidget(new QLabel(tr("Jog:"), tgtBox));
+        auto* jogLbl = new QLabel(tr("Jog:"), tgtBox);
+        jogLbl->setMinimumWidth(kLabelColPx);
+        jogRow->addWidget(jogLbl);
         jogRow->addWidget(m_jogMinus);
         jogRow->addWidget(m_jogStep);
         jogRow->addWidget(m_jogPlus);
@@ -196,7 +224,9 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
 
         /* Named-preset row. */
         auto* savedRow = new QHBoxLayout;
-        savedRow->addWidget(new QLabel(tr("Saved:"), tgtBox));
+        auto* savedLbl = new QLabel(tr("Saved:"), tgtBox);
+        savedLbl->setMinimumWidth(kLabelColPx);
+        savedRow->addWidget(savedLbl);
         savedRow->addWidget(m_presetCombo, /*stretch=*/1);
         savedRow->addWidget(m_presetSaveBtn);
         savedRow->addWidget(m_presetDelBtn);
@@ -439,7 +469,123 @@ JointControlPanel::JointControlPanel(QWidget* parent) : QWidget(parent)
     root->addWidget(walkBox);     /* Manual CiA-402: below Bringup, above Mode */
     root->addWidget(modeBox);
     root->addWidget(tgtBox);
+
+    /* ---- Scenarios: sequenced multi-loop test recipes -------- *
+     * All scenarios live in ~/.config/<App>/scenarios.json (single
+     * file, array of {name, description, steps}). Runtime is a plain
+     * QTimer::singleShot chain; each step emits the same
+     * modeRequested + targetRequested signals the operator would
+     * fire manually, so no new worker plumbing is required.
+     * Placed above the V/F group because the scenarios operate on
+     * closed-loop modes; V/F stays adjacent as the "open-loop debug
+     * aid" at the bottom of the stack. */
+    auto* scenBox = new QGroupBox(tr("Scenarios"), this);
+    {
+        auto* v = new QVBoxLayout(scenBox);
+        /* Filter row — narrows the scenarios combo to one control-loop
+         * category. Handy when the store has 10+ scenarios and the
+         * operator just wants to sweep position tuning today. */
+        auto* filterRow = new QHBoxLayout();
+        filterRow->addWidget(new QLabel(tr("Filter:"), scenBox));
+        m_scenFilter = new QComboBox(scenBox);
+        m_scenFilter->addItem(tr("All"),       -1);
+        m_scenFilter->addItem(tr("Position"),  int(Mode::Position));
+        m_scenFilter->addItem(tr("Velocity"),  int(Mode::Velocity));
+        m_scenFilter->addItem(tr("Torque"),    int(Mode::Torque));
+        m_scenFilter->addItem(tr("Mixed"),     int(Mode::None));
+        m_scenFilter->setToolTip(tr("Only show scenarios whose steps "
+            "all target the selected loop. \"Mixed\" surfaces "
+            "scenarios that chain multiple modes."));
+        filterRow->addWidget(m_scenFilter);
+        filterRow->addStretch(1);
+        v->addLayout(filterRow);
+        connect(m_scenFilter,
+                QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int){ applyScenarioFilter(); });
+
+        auto* row = new QHBoxLayout();
+        m_scenCombo = new QComboBox(scenBox);
+        m_scenCombo->setToolTip(tr("Predefined test recipes discovered "
+            "in the scenarios folder. Each recipe drives the selected "
+            "slave through a scripted sequence of position / velocity / "
+            "torque targets."));
+        m_scenRefreshBtn = new QPushButton(tr("↻"), scenBox);
+        m_scenRefreshBtn->setToolTip(tr("Re-read scenarios.json from "
+            "disk (picks up edits made outside the tool)."));
+        m_scenRefreshBtn->setFixedWidth(28);
+        m_scenEditBtn = new QPushButton(tr("Edit…"), scenBox);
+        m_scenEditBtn->setToolTip(tr("Open the scenario editor: "
+            "add / rename / re-order / remove scenarios and steps. "
+            "OK saves everything back to scenarios.json."));
+        m_scenRunBtn  = new QPushButton(tr("Run"),  scenBox);
+        m_scenStopBtn = new QPushButton(tr("Stop"), scenBox);
+        m_scenStopBtn->setEnabled(false);
+        row->addWidget(m_scenCombo, /*stretch=*/1);
+        row->addWidget(m_scenRefreshBtn);
+        row->addWidget(m_scenEditBtn);
+        row->addWidget(m_scenRunBtn);
+        row->addWidget(m_scenStopBtn);
+        v->addLayout(row);
+
+        m_scenStatus = new QLabel(tr("idle"), scenBox);
+        m_scenStatus->setStyleSheet("QLabel { color: #555; }");
+        v->addWidget(m_scenStatus);
+
+        m_scenDesc = new QLabel(scenBox);
+        m_scenDesc->setWordWrap(true);
+        m_scenDesc->setStyleSheet("QLabel { color: #888; "
+                                    "font-size: 9pt; padding: 2px 4px; }");
+        v->addWidget(m_scenDesc);
+
+        connect(m_scenRefreshBtn, &QPushButton::clicked,
+                this, &JointControlPanel::refreshScenarios);
+        connect(m_scenEditBtn,    &QPushButton::clicked,
+                this, &JointControlPanel::onEditScenarios);
+        connect(m_scenRunBtn,     &QPushButton::clicked,
+                this, &JointControlPanel::startScenario);
+        connect(m_scenStopBtn,    &QPushButton::clicked,
+                this, &JointControlPanel::stopScenario);
+        /* Update the description line + re-gate the Run button as the
+         * operator scrolls through the combobox — Run is only
+         * enabled when the selected scenario's dominant mode matches
+         * the panel's current control mode (or is Mixed). Combobox
+         * indices no longer map 1:1 to m_scenarios, so look up by
+         * name for description. */
+        connect(m_scenCombo,
+                QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int){
+                    const QString name = m_scenCombo->currentText();
+                    for (const auto& s : m_scenarios){
+                        if (s.name == name){
+                            m_scenDesc->setText(s.description);
+                            break;
+                        }
+                    }
+                    /* Cheapest re-gate — replay the whole filter path
+                     * which rebuilds run-button state. */
+                    if (m_scenRunBtn && m_scenCombo->count() > 0
+                        && m_idx >= 0 && !m_scenActive){
+                        const int selMode =
+                            m_scenCombo->currentData(Qt::UserRole).toInt();
+                        const Mode dm = static_cast<Mode>(selMode);
+                        const Mode panelMode = m_modeCombo
+                            ? static_cast<Mode>(m_modeCombo->currentData().toInt())
+                            : Mode::None;
+                        m_scenRunBtn->setEnabled(
+                            panelMode != Mode::None
+                            && (dm == panelMode || dm == Mode::None));
+                    }
+                });
+    }
+    root->addWidget(scenBox);
     root->addWidget(vfBox);
+
+    /* First-launch: drop the starter scenarios into the config file
+     * so the combobox isn't empty on a fresh install. Idempotent —
+     * subsequent launches leave whatever's on disk alone. */
+    writeStarterScenariosIfEmpty();
+    refreshScenarios();
+
     root->addStretch();
 
     connect(m_bringup,    &QPushButton::clicked, this, [this]{
@@ -497,6 +643,16 @@ void JointControlPanel::setActiveSlave(int idx, const QString& name)
         m_label->setText(tr("(select a slave above)"));
     } else {
         m_label->setText(tr("Slave %1  —  %2").arg(idx).arg(name));
+    }
+    /* A scenario in flight targets the previously-active slave; changing
+     * slaves would otherwise leave the QTimer chain firing at a stale
+     * m_idx. Stop cleanly so the next slave starts idle. */
+    if (m_scenActive){ stopScenario(); }
+    if (m_scenRunBtn){
+        m_scenRunBtn->setEnabled(!m_scenActive
+                                  && m_scenCombo
+                                  && m_scenCombo->count() > 0
+                                  && m_idx >= 0);
     }
     refreshReadout();
     refreshButtons();
@@ -629,6 +785,26 @@ void JointControlPanel::syncTargetKindToMode()
     const int found = m_targetCombo->findData(desired);
     if (found >= 0){ m_targetCombo->setCurrentIndex(found); }
 
+    /* Deg toggle is the one control that's genuinely Position-only —
+     * the rad↔deg conversion only makes sense against a rad value.
+     * Presets (0 / ±π/4 / Home) are NOT gated: they push a numeric
+     * value into the spinbox in whatever unit the current mode uses,
+     * so `Home` = 0 in every mode, `+π/4` = 0.785 (rad or rad/s or
+     * Nm), and that's a legitimate operator choice. Gating presets
+     * was over-reach that clashed with @ref refreshButtons's
+     * drive-state gating anyway. */
+    if (m_degToggle){ m_degToggle->setEnabled(mode == Mode::Position); }
+
+    /* Auto-follow the Scenarios filter to the picked mode so the combo
+     * narrows to the relevant loop's scenarios. Silently skip when
+     * the filter widget isn't up yet (ctor call order). */
+    if (m_scenFilter){
+        const int fi = m_scenFilter->findData(int(mode));
+        if (fi >= 0 && m_scenFilter->currentIndex() != fi){
+            m_scenFilter->setCurrentIndex(fi);   /* triggers applyScenarioFilter */
+        }
+    }
+
     /* Force deg off when leaving Position — degrees aren't meaningful
      * for rad/s or Nm. Block the signal so we don't re-enter the
      * conversion dance with whatever value is in the spinbox. */
@@ -754,6 +930,426 @@ QString JointControlPanel::presetStorePath()
     const QString dir = QStandardPaths::writableLocation(
         QStandardPaths::AppConfigLocation);
     return dir + QStringLiteral("/control_presets.json");
+}
+
+
+/* ================================================================
+ *  Scenarios — implementation
+ * ================================================================ */
+QString JointControlPanel::scenariosPath()
+{
+    const QString dir = QStandardPaths::writableLocation(
+        QStandardPaths::AppConfigLocation);
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/scenarios.json");
+}
+
+
+JointControlPanel::Scenario JointControlPanel::parseScenarioObject(
+    const QJsonObject& obj, const QString& fallbackName)
+{
+    Scenario s;
+    s.name        = obj.value(QStringLiteral("name")).toString();
+    s.description = obj.value(QStringLiteral("description")).toString();
+    if (s.name.isEmpty()){ s.name = fallbackName; }
+    const QJsonArray steps = obj.value(QStringLiteral("steps")).toArray();
+    for (const auto& sv : steps){
+        if (!sv.isObject()){ continue; }
+        const auto so = sv.toObject();
+        ScenarioStep st;
+        const QString modeStr = so.value(QStringLiteral("mode"))
+                                   .toString().toLower();
+        if      (modeStr == QLatin1String("position")) {
+            st.mode = Mode::Position; st.kind = TargetKind::Position;
+        } else if (modeStr == QLatin1String("velocity")) {
+            st.mode = Mode::Velocity; st.kind = TargetKind::Velocity;
+        } else if (modeStr == QLatin1String("torque")) {
+            st.mode = Mode::Torque;   st.kind = TargetKind::Torque;
+        } else {
+            continue;   /* skip malformed step rather than fail whole file */
+        }
+        st.target = so.value(QStringLiteral("target")).toDouble(0.0);
+        st.holdMs = std::max(0, so.value(QStringLiteral("hold_ms"))
+                                     .toInt(500));
+        s.steps.append(st);
+    }
+    return s;
+}
+
+
+QJsonObject JointControlPanel::scenarioToJson(const Scenario& s)
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("name"),        s.name);
+    obj.insert(QStringLiteral("description"), s.description);
+    QJsonArray steps;
+    for (const auto& st : s.steps){
+        QJsonObject stObj;
+        const char* modeStr =
+            st.mode == Mode::Position ? "position" :
+            st.mode == Mode::Velocity ? "velocity" :
+            st.mode == Mode::Torque   ? "torque"   : "position";
+        stObj.insert(QStringLiteral("mode"),    QString::fromLatin1(modeStr));
+        stObj.insert(QStringLiteral("target"),  st.target);
+        stObj.insert(QStringLiteral("hold_ms"), st.holdMs);
+        steps.append(stObj);
+    }
+    obj.insert(QStringLiteral("steps"), steps);
+    return obj;
+}
+
+
+void JointControlPanel::migrateLegacyScenariosIfNeeded()
+{
+    /* One-shot conversion: if the pre-consolidation folder still exists
+     * AND scenarios.json doesn't, fold every legacy file into the new
+     * single-file format so operator-authored scenarios survive the
+     * format change without manual work. */
+    if (QFileInfo::exists(scenariosPath())){ return; }
+    const QString legacyDir = QStandardPaths::writableLocation(
+        QStandardPaths::AppConfigLocation) + QStringLiteral("/scenarios");
+    QDir d(legacyDir);
+    if (!d.exists()){ return; }
+    const auto files = d.entryList({"*.json"}, QDir::Files, QDir::Name);
+    if (files.isEmpty()){ return; }
+    QJsonArray combined;
+    for (const QString& fname : files){
+        QFile f(d.absoluteFilePath(fname));
+        if (!f.open(QIODevice::ReadOnly)){ continue; }
+        const auto doc = QJsonDocument::fromJson(f.readAll());
+        f.close();
+        if (!doc.isObject()){ continue; }
+        QJsonObject o = doc.object();
+        /* Older files may lack "name"; fall back to the filename base. */
+        if (!o.contains(QStringLiteral("name"))
+            || o.value(QStringLiteral("name")).toString().isEmpty()){
+            o.insert(QStringLiteral("name"),
+                     QFileInfo(fname).baseName());
+        }
+        combined.append(o);
+    }
+    if (combined.isEmpty()){ return; }
+    QJsonDocument doc(combined);
+    QFile out(scenariosPath());
+    if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)){
+        out.write(doc.toJson(QJsonDocument::Indented));
+        out.close();
+    }
+    /* Rename the legacy folder aside so the migration doesn't re-fire
+     * on next launch even if the operator later deletes scenarios.json.
+     * Non-fatal on failure — the QFileInfo guard at the top already
+     * short-circuits repeat runs when the new file exists. */
+    QDir().rename(legacyDir, legacyDir + QStringLiteral(".migrated"));
+}
+
+
+void JointControlPanel::writeStarterScenariosIfEmpty()
+{
+    migrateLegacyScenariosIfNeeded();
+    if (QFileInfo::exists(scenariosPath())){ return; }
+    /* Three starters — one per control loop — so the operator can
+     * verify each loop responds correctly in one click each. Values
+     * are conservative (small sweeps at low speed / low torque) so a
+     * fresh install can't spin a motor into anything dangerous. */
+    static const char* kStarters = R"([
+  {
+    "name": "Position sweep ±π/4",
+    "description": "Alternate ±π/4 rad position steps; holds each for 1.5 s.",
+    "steps": [
+      { "mode": "position", "target":  0.0,     "hold_ms":  500 },
+      { "mode": "position", "target":  0.7854,  "hold_ms": 1500 },
+      { "mode": "position", "target": -0.7854,  "hold_ms": 1500 },
+      { "mode": "position", "target":  0.0,     "hold_ms":  500 }
+    ]
+  },
+  {
+    "name": "Velocity square ±2 rad/s",
+    "description": "Alternate ±2 rad/s velocity for 2 s each, then coast.",
+    "steps": [
+      { "mode": "velocity", "target":  2.0,  "hold_ms": 2000 },
+      { "mode": "velocity", "target": -2.0,  "hold_ms": 2000 },
+      { "mode": "velocity", "target":  0.0,  "hold_ms":  500 }
+    ]
+  },
+  {
+    "name": "Torque step 0 → 0.2 → 0 N·m",
+    "description": "Small torque step to verify current-loop response; release after 1 s.",
+    "steps": [
+      { "mode": "torque",   "target":  0.0,  "hold_ms":  300 },
+      { "mode": "torque",   "target":  0.2,  "hold_ms": 1000 },
+      { "mode": "torque",   "target":  0.0,  "hold_ms":  300 }
+    ]
+  }
+])";
+    QFile f(scenariosPath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)){
+        f.write(kStarters);
+        f.close();
+    }
+}
+
+
+void JointControlPanel::saveScenariosToDisk() const
+{
+    QJsonArray arr;
+    for (const auto& s : m_scenarios){
+        arr.append(scenarioToJson(s));
+    }
+    QFile f(scenariosPath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)){
+        qWarning("scenarios: cannot write %s",
+                 qUtf8Printable(scenariosPath()));
+        return;
+    }
+    QJsonDocument doc(arr);
+    f.write(doc.toJson(QJsonDocument::Indented));
+    f.close();
+}
+
+
+Mode JointControlPanel::dominantMode(const Scenario& s)
+{
+    if (s.steps.isEmpty()){ return Mode::None; }
+    Mode first = s.steps.first().mode;
+    for (const auto& st : s.steps){
+        if (st.mode != first){ return Mode::None; }   /* Mixed */
+    }
+    return first;
+}
+
+
+void JointControlPanel::applyScenarioFilter()
+{
+    if (!m_scenCombo){ return; }
+    /* Preserve current selection if it survives the rebuild. */
+    const QString wasSel = m_scenCombo->currentIndex() >= 0
+        ? m_scenCombo->currentText() : QString();
+    m_scenCombo->blockSignals(true);
+    m_scenCombo->clear();
+
+    const int filterData = m_scenFilter
+        ? m_scenFilter->currentData().toInt() : -1;
+    /* Current control-panel mode drives the graying (not the filter):
+     * even in "All", scenarios whose dominant mode doesn't match the
+     * mode combobox appear grayed so the operator sees at a glance
+     * which ones are eligible for Run. */
+    const auto panelMode = m_modeCombo
+        ? static_cast<Mode>(m_modeCombo->currentData().toInt())
+        : Mode::None;
+
+    for (int i = 0; i < m_scenarios.size(); ++i){
+        const auto& s = m_scenarios[i];
+        if (filterData >= 0){
+            /* Explicit filter still hides non-matching. */
+            if (int(dominantMode(s)) != filterData){ continue; }
+        }
+        m_scenCombo->addItem(s.name);
+        /* Store the scenario's dominant mode as UserRole so the
+         * selection-changed handler can gate Run without a second
+         * scan through m_scenarios. */
+        const Mode dm = dominantMode(s);
+        const int comboRow = m_scenCombo->count() - 1;
+        m_scenCombo->setItemData(comboRow, int(dm), Qt::UserRole);
+        /* Gray out non-matching-mode scenarios so the operator sees
+         * they aren't runnable in the current panel mode. Kept
+         * selectable so operators can inspect the description. */
+        const bool matches = (panelMode != Mode::None
+                               && (dm == panelMode || dm == Mode::None));
+        if (!matches){
+            m_scenCombo->setItemData(comboRow,
+                QBrush(QColor("#aaa")), Qt::ForegroundRole);
+        }
+    }
+
+    if (!wasSel.isEmpty()){
+        const int i = m_scenCombo->findText(wasSel);
+        m_scenCombo->setCurrentIndex(i >= 0 ? i : 0);
+    }
+    m_scenCombo->blockSignals(false);
+
+    /* Sync the description line to the (possibly new) selection. */
+    if (m_scenCombo->count() > 0){
+        const QString name = m_scenCombo->currentText();
+        for (const auto& s : m_scenarios){
+            if (s.name == name){
+                m_scenDesc->setText(s.description);
+                break;
+            }
+        }
+    } else {
+        m_scenDesc->setText(m_scenarios.isEmpty()
+            ? tr("<i>No scenarios in %1 — click Edit… to create one.</i>")
+                .arg(scenariosPath())
+            : tr("<i>No scenarios match the current filter.</i>"));
+    }
+
+    /* Run only fires when a scenario is selected AND its dominant mode
+     * matches the panel's current mode (or is Mixed). Edit stays open
+     * for editing anything regardless of mode. */
+    if (m_scenRunBtn){
+        bool runnable = !m_scenActive
+                         && m_scenCombo->count() > 0
+                         && m_idx >= 0;
+        if (runnable){
+            const int selMode = m_scenCombo->currentData(Qt::UserRole).toInt();
+            const Mode dm = static_cast<Mode>(selMode);
+            runnable = (panelMode != Mode::None)
+                        && (dm == panelMode || dm == Mode::None);
+        }
+        m_scenRunBtn->setEnabled(runnable);
+    }
+}
+
+
+void JointControlPanel::refreshScenarios()
+{
+    m_scenarios.clear();
+    QFile f(scenariosPath());
+    if (f.open(QIODevice::ReadOnly)){
+        const auto doc = QJsonDocument::fromJson(f.readAll());
+        f.close();
+        /* Accept a bare array (canonical form) or an object with a
+         * "scenarios": [...] key (hand-authored files that wanted a
+         * wrapper). Both survive round-trip via the save path. */
+        QJsonArray arr;
+        if (doc.isArray()){ arr = doc.array(); }
+        else if (doc.isObject()){
+            arr = doc.object().value(QStringLiteral("scenarios")).toArray();
+        }
+        int fallbackIdx = 1;
+        for (const auto& sv : arr){
+            if (!sv.isObject()){ continue; }
+            Scenario s = parseScenarioObject(sv.toObject(),
+                tr("scenario %1").arg(fallbackIdx++));
+            if (s.steps.isEmpty()){ continue; }   /* skip empty */
+            m_scenarios.append(s);
+        }
+    }
+    /* Combobox contents are computed by the filter — refresh piggybacks
+     * on it so there's one code path for "who goes in the combo". */
+    applyScenarioFilter();
+}
+
+
+void JointControlPanel::onEditScenarios()
+{
+    /* Editing while a scenario is running would leave the QTimer chain
+     * pointing at potentially-deleted steps. Stop first. */
+    if (m_scenActive){ stopScenario(); }
+    ScenarioEditorDialog dlg(m_scenarios, this);
+    if (dlg.exec() != QDialog::Accepted){ return; }
+    m_scenarios = dlg.scenarios();
+    saveScenariosToDisk();
+    /* Repopulate the combobox from the new in-memory set — refresh
+     * re-reads from disk, which is redundant but keeps a single code
+     * path and confirms the write went through. */
+    refreshScenarios();
+}
+
+
+void JointControlPanel::startScenario()
+{
+    if (m_scenActive){ return; }
+    if (m_idx < 0){
+        m_scenStatus->setText(tr("no slave selected"));
+        return;
+    }
+    /* Look up by name — combobox indices don't align with m_scenarios
+     * when the filter is narrower than "All". */
+    const QString name = m_scenCombo->currentText();
+    if (name.isEmpty()){ return; }
+    bool found = false;
+    for (const auto& s : m_scenarios){
+        if (s.name == name){ m_scenCurrent = s; found = true; break; }
+    }
+    if (!found || m_scenCurrent.steps.isEmpty()){
+        m_scenStatus->setText(tr("scenario is empty"));
+        return;
+    }
+    m_scenActive = true;
+    m_scenIndex  = -1;                      /* advanceScenarioStep increments to 0 */
+    m_scenRunBtn ->setEnabled(false);
+    m_scenStopBtn->setEnabled(true);
+    m_scenCombo  ->setEnabled(false);
+    m_scenRefreshBtn->setEnabled(false);
+    advanceScenarioStep();
+}
+
+
+void JointControlPanel::stopScenario()
+{
+    if (!m_scenActive){ return; }
+    m_scenActive = false;
+    m_scenIndex  = -1;
+    m_scenRunBtn ->setEnabled(m_scenCombo->count() > 0 && m_idx >= 0);
+    m_scenStopBtn->setEnabled(false);
+    m_scenCombo  ->setEnabled(true);
+    m_scenRefreshBtn->setEnabled(true);
+    m_scenStatus->setText(tr("stopped"));
+    /* Zero the setpoint so a torque / velocity scenario doesn't leave
+     * the drive running. Emitted in whichever mode the last step used,
+     * which is the mode currently on the slave. */
+    if (m_idx >= 0 && !m_scenCurrent.steps.isEmpty()){
+        const auto& last = m_scenCurrent.steps.last();
+        emit targetRequested(m_idx, last.kind, 0.0f);
+    }
+}
+
+
+void JointControlPanel::advanceScenarioStep()
+{
+    if (!m_scenActive){ return; }
+    ++m_scenIndex;
+    if (m_scenIndex >= m_scenCurrent.steps.size()){
+        /* Natural end — reset transport but leave the last commanded
+         * value in place (the operator can zero it manually). */
+        m_scenActive = false;
+        m_scenRunBtn ->setEnabled(m_scenCombo->count() > 0 && m_idx >= 0);
+        m_scenStopBtn->setEnabled(false);
+        m_scenCombo  ->setEnabled(true);
+        m_scenRefreshBtn->setEnabled(true);
+        m_scenStatus->setText(tr("done (%1 steps)")
+                                  .arg(m_scenCurrent.steps.size()));
+        return;
+    }
+    const auto& st = m_scenCurrent.steps[m_scenIndex];
+    /* Push the mode first, then the setpoint. Some drives reject a
+     * setpoint arriving before the mode change lands; a 50 ms gap
+     * between the two lets the SDO write settle without forcing an
+     * SDO-completion signal we'd have to plumb here. */
+    emit modeRequested(m_idx, st.mode);
+    QTimer::singleShot(50, this, [this, st]{
+        if (!m_scenActive){ return; }
+        emit targetRequested(m_idx, st.kind, float(st.target));
+    });
+    refreshScenarioStatus();
+    QTimer::singleShot(st.holdMs, this,
+        [this]{ advanceScenarioStep(); });
+}
+
+
+void JointControlPanel::refreshScenarioStatus()
+{
+    if (!m_scenActive || m_scenIndex < 0
+        || m_scenIndex >= m_scenCurrent.steps.size()){
+        return;
+    }
+    const auto& st = m_scenCurrent.steps[m_scenIndex];
+    const char* modeName =
+        st.mode == Mode::Position ? "position" :
+        st.mode == Mode::Velocity ? "velocity" :
+        st.mode == Mode::Torque   ? "torque"   : "?";
+    const char* unit =
+        st.mode == Mode::Position ? "rad"    :
+        st.mode == Mode::Velocity ? "rad/s"  :
+        st.mode == Mode::Torque   ? "N·m"    : "";
+    m_scenStatus->setText(tr("step %1/%2  —  %3 %4 %5  (%6 ms)")
+                              .arg(m_scenIndex + 1)
+                              .arg(m_scenCurrent.steps.size())
+                              .arg(QString::fromLatin1(modeName))
+                              .arg(st.target, 0, 'f', 3)
+                              .arg(QString::fromLatin1(unit))
+                              .arg(st.holdMs));
 }
 
 void JointControlPanel::loadPresetStore()

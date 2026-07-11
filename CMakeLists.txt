@@ -85,6 +85,8 @@ add_executable(vr_mc_diagnostic
     src/ObjectDictionaryDialog.hpp
     src/RunInDialog.cpp
     src/RunInDialog.hpp
+    src/ScenarioEditorDialog.cpp
+    src/ScenarioEditorDialog.hpp
     src/FirmwareUpgradeDialog.cpp
     src/FirmwareUpgradeDialog.hpp
     src/SlaveTableModel.cpp

@@ -199,6 +199,111 @@ private:
     /** @brief Path of the JSON store (~/.config/vrmc/control_presets.json). */
     static QString presetStorePath();
 
+    /* ================================================================
+     *  Scenarios — sequenced multi-loop test recipes.
+     * ================================================================
+     *  A scenario is a JSON file with a name + ordered steps. Each step
+     *  picks a control mode (position / velocity / torque) and a target
+     *  value in the mode's native unit (rad, rad/s, N·m), plus a hold
+     *  duration. The panel loads any scenario in the config directory,
+     *  runs it via QTimer + modeRequested / targetRequested emits, and
+     *  reports live progress next to the transport controls.
+     *
+     *  Schema (one JSON per scenario):
+     *     {
+     *       "name":        "Position sweep ±π/2",
+     *       "description": "Alternate ±π/2 position steps, hold 1.5 s",
+     *       "steps": [
+     *         { "mode": "position", "target":  0.0,      "hold_ms":  500 },
+     *         { "mode": "position", "target":  1.5707,   "hold_ms": 1500 },
+     *         { "mode": "position", "target": -1.5707,   "hold_ms": 1500 },
+     *         { "mode": "position", "target":  0.0,      "hold_ms":  500 }
+     *       ]
+     *     }
+     */
+public:
+    struct ScenarioStep {
+        Mode        mode;
+        TargetKind  kind;          /**< derived from mode                  */
+        double      target;        /**< rad / rad·s⁻¹ / N·m per mode       */
+        int         holdMs;
+    };
+    struct Scenario {
+        QString                 name;
+        QString                 description;
+        QVector<ScenarioStep>   steps;
+    };
+
+private:
+
+    /** @brief Load `scenarios.json` off disk and repopulate the
+     *  combobox. Missing file triggers @ref writeStarterScenariosIfEmpty. */
+    void refreshScenarios();
+    /** @brief Serialise @c m_scenarios back to disk. Called by the
+     *  Edit dialog on Accept. */
+    void saveScenariosToDisk() const;
+    /** @brief Parse one JSON object into a Scenario. Returns empty on
+     *  bad shape (missing name / empty steps). */
+    static Scenario parseScenarioObject(const QJsonObject& obj,
+                                          const QString& fallbackName);
+    /** @brief Serialise a Scenario back to a JSON object. */
+    static QJsonObject scenarioToJson(const Scenario& s);
+    /** @brief Kick off the currently-selected scenario. Idempotent
+     *  no-op while one is already running. */
+    void startScenario();
+    /** @brief Stop a running scenario and reset the transport state.
+     *  Safe to call when nothing is running. */
+    void stopScenario();
+    /** @brief Advance one step. Wired to a QTimer::singleShot on the
+     *  previous step's holdMs. */
+    void advanceScenarioStep();
+    /** @brief Update the progress label from @c m_scenIndex /
+     *  @c m_scenActive / @c m_scenCurrent. */
+    void refreshScenarioStatus();
+    /** @brief `~/.config/<AppName>/scenarios.json` (parent dir created
+     *  if missing). Single-file store replaces the earlier per-scenario
+     *  files; @ref refreshScenarios auto-migrates legacy files. */
+    static QString scenariosPath();
+    /** @brief One-shot migration: if the old per-scenario folder
+     *  (`~/.config/<AppName>/scenarios/*.json`) exists AND the new
+     *  `scenarios.json` doesn't, roll every legacy file into the new
+     *  format so operator-authored scenarios survive the format
+     *  change. Called at the top of @ref refreshScenarios. */
+    static void migrateLegacyScenariosIfNeeded();
+    /** @brief Write a single `scenarios.json` with three starter
+     *  scenarios (one per control loop) when the file doesn't exist
+     *  yet. Idempotent — later launches leave whatever's on disk alone. */
+    static void writeStarterScenariosIfEmpty();
+    /** @brief Open the modal Scenario editor. On Accept, replaces
+     *  @c m_scenarios, persists to disk, and repopulates the combobox. */
+    void onEditScenarios();
+    /** @brief Rebuild the scenarios combobox from @c m_scenarios,
+     *  filtered by the current @c m_scenFilter selection (All /
+     *  Position / Velocity / Torque). Preserves the selected item when
+     *  possible. */
+    void applyScenarioFilter();
+    /** @brief Classify a scenario by its dominant step mode. Returns
+     *  vrmc::Mode::None when the scenario mixes multiple modes
+     *  (renders as the "Mixed" bucket). Position-only scenarios return
+     *  vrmc::Mode::Position, etc. */
+    static vrmc::Mode dominantMode(const Scenario& s);
+
+    /* Scenarios UI. */
+    QComboBox*      m_scenFilter      = nullptr;   /**< All / Pos / Vel / Trq   */
+    QComboBox*      m_scenCombo       = nullptr;
+    QPushButton*    m_scenRefreshBtn  = nullptr;
+    QPushButton*    m_scenEditBtn     = nullptr;
+    QPushButton*    m_scenRunBtn      = nullptr;
+    QPushButton*    m_scenStopBtn     = nullptr;
+    QLabel*         m_scenStatus      = nullptr;
+    QLabel*         m_scenDesc        = nullptr;
+
+    /* Scenario runtime state. */
+    QVector<Scenario> m_scenarios;
+    Scenario          m_scenCurrent;
+    int               m_scenIndex     = -1;    /**< current step index      */
+    bool              m_scenActive    = false;
+
     /* Phase C widgets. */
     QLabel*        m_errorLabel       = nullptr;   /* decoded error code   */
     QLabel*        m_trackLabel       = nullptr;   /* tracking error Δq    */
